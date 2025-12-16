@@ -16,6 +16,10 @@ from omegaconf import OmegaConf
 from torchvision.transforms import ToPILImage, ToTensor
 from tqdm import tqdm
 from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler
+
+# TEST FLUX
+from diffusers import FluxFillPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
+
 from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
 from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNormal, MarigoldNormalsPipeline
@@ -120,15 +124,36 @@ def run(config):
     segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
 
     mask_generator = create_mask_generator_repvit()
-
-    inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-            config["stable_diffusion_checkpoint"],
-            safety_checker=None,
+    
+    if config["use_flux"]:
+        # Use FLUX
+        # pipe = FluxFillPipeline.from_pretrained("black-forest-labs/FLUX.1-Fill-dev", torch_dtype=torch.bfloat16)
+        # pipe.enable_model_cpu_offload()
+        # DFloat11Model.from_pretrained('DFloat11/FLUX.1-Fill-dev-DF11', device='cpu', bfloat16_model=pipe.transformer)
+        # inpainter_pipeline = pipe
+        transformer = FluxTransformer2DModel.from_single_file(
+            "https://huggingface.co/YarvixPA/FLUX.1-Fill-dev-gguf/blob/main/flux1-fill-dev-Q4_0.gguf",
+            quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
             torch_dtype=torch.bfloat16,
-        ).to(config["device"])
-    inpainter_pipeline.scheduler = DDIMScheduler.from_config(inpainter_pipeline.scheduler.config)
-    inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
-    inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
+        )
+        device = torch.device("cuda:1")
+        inpainter_pipeline = FluxFillPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-Fill-dev",
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        ).to(device)
+        print(inpainter_pipeline.hf_device_map)
+    else:
+        # Use SD checkpoint
+        inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
+                config["stable_diffusion_checkpoint"],
+                safety_checker=None,
+                torch_dtype=torch.bfloat16,
+            ).to(config["device"])
+        inpainter_pipeline.scheduler = DDIMScheduler.from_config(inpainter_pipeline.scheduler.config)
+        inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
+        inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
+
     
     rotation_path = config['rotation_path'][:config['num_scenes']]
     assert len(rotation_path) == config['num_scenes']

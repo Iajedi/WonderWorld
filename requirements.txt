@@ -24,3 +24,4 @@ av
 easydict==1.13
 mediapy==1.2.2
 huggingface-hub==0.24.6
+httpx==0.27.2

@@ -10,6 +10,10 @@ from kornia.morphology import dilation
 import cv2
 import numpy as np
 import torch
+
+# TEST
+import torchvision
+
 import torch.nn.functional as F
 import skimage
 from PIL import Image
@@ -198,6 +202,9 @@ class FrameSyn(torch.nn.Module):
         self.depth_model_name = config['depth_model'].lower()
         self.depth_shift = config['depth_shift']
         self.very_far_depth = config['sky_hard_depth'] * 2
+        
+        # TEST: USE FLUX
+        self.use_flux = config["use_flux"]
 
         # 2D pixel points to be used for unprojection and adding new points to PC
         x = torch.arange(512).float() + 0.5
@@ -372,22 +379,40 @@ class FrameSyn(torch.nn.Module):
         if negative_prompt is None:
             negative_prompt = self.adaptive_negative_prompt + self.negative_inpainting_prompt if self.adaptive_negative_prompt != None else self.negative_inpainting_prompt
       
-        inpainted_image = self.inpainting_pipeline(
-            prompt='' if self.use_noprompt else self.inpainting_prompt,
-            negative_prompt=negative_prompt,
-            image=init_image,
-            mask_image=mask_image,
-            num_inference_steps=diffusion_steps,
-            guidance_scale=0 if self.use_noprompt else 7.5,
-            height=self.inpainting_resolution,
-            width=self.inpainting_resolution,
-            self_guidance=self_guidance,
-            inpaint_mask=~padded_inpainting_mask.bool(),
-            rendered_image=padded_rendered_image,
-        ).images[0]
+        if self.use_flux:
+            max_res = max(self.inpainting_resolution, 576)
+            inpainted_image = self.inpainting_pipeline(
+                prompt="" if self.use_noprompt else self.inpainting_prompt,
+                image=init_image,
+                mask_image=mask_image,
+                height=max_res,
+                width=max_res,
+                guidance_scale=50,
+                num_inference_steps=diffusion_steps,
+                max_sequence_length=512,
+                generator=torch.Generator("cpu").manual_seed(0),
+            ).images[0]
+            inpainted_image = inpainted_image.resize((self.inpainting_resolution, self.inpainting_resolution), Image.Resampling.LANCZOS)
+            inpainted_image = torchvision.transforms.ToTensor()(inpainted_image).cuda(device=0)
+        else:
+            inpainted_image = self.inpainting_pipeline(
+                prompt='' if self.use_noprompt else self.inpainting_prompt,
+                negative_prompt=negative_prompt,
+                image=init_image,
+                mask_image=mask_image,
+                num_inference_steps=diffusion_steps,
+                guidance_scale=0 if self.use_noprompt else 7.5,
+                height=self.inpainting_resolution,
+                width=self.inpainting_resolution,
+                self_guidance=self_guidance,
+                inpaint_mask=~padded_inpainting_mask.bool(),
+                rendered_image=padded_rendered_image,
+            ).images[0]
+            inpainted_image = (inpainted_image / 2 + 0.5)
+        
         
         # [1, 3, 512, 512]
-        inpainted_image = (inpainted_image / 2 + 0.5).clamp(0, 1).to(torch.float32)[None]
+        inpainted_image = inpainted_image.clamp(0, 1).to(torch.float32)[None]
             
         post_mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).float() * 255
         
