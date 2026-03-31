@@ -795,6 +795,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             generator=generator,
             latents=latents,
         )
+        
+        print(f"{batch_size=} {num_channels_latents=} {height=} {width=} latent_shape={latents.shape}")
 
         image_latents = None
         image_latent_ids = None

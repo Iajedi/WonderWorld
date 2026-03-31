@@ -1,24 +1,40 @@
 import torch
 from diffusers import Flux2KleinPipeline
+import os
+import numpy as np
+from PIL import Image
 
 device = "cuda"
 dtype = torch.bfloat16
 
-# Do not use distilled model
-pipe = Flux2KleinPipeline.from_pretrained("black-forest-labs/FLUX.2-klein-base-4B", torch_dtype=dtype)
-pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
+MM_VITAL_BLOCKS = [0, 4]
+NUM_MM_BLOCKS = 5
+SINGLE_VITAL_BLOCKS = list(np.array([9, 10, 15, 24]) - NUM_MM_BLOCKS)
 
-# No of blocks: 25
-# 5 double, 20 single per pass
-print(len(pipe.transformer.transformer_blocks))
-print(len(pipe.transformer.single_transformer_blocks))
+class FluxStableFlowPipeline:
+    def __init__(self, offload=False):
+        self.pipe = Flux2KleinPipeline.from_pretrained("black-forest-labs/FLUX.2-klein-base-4B", torch_dtype=dtype)
+        if offload:
+            self.pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
+        else:
+            print(torch.cuda.is_available())
+            self.pipe.to(device)
 
-# For k = 64
-# We generate k seeds
-# For each of the k prompts by GPT, fixed seed i
-# Pass through model with all layers, fixed seed i, encode DinoV2
-# Pass through model with one layer deactivated i, encode DinoV2
-# Total: 64 * (25 + 1) iterations
+    @torch.no_grad
+    def generate(self, prompt, seed):
+        image = self.pipe(
+            prompt=prompt,
+            height=512,
+            width=512,
+            guidance_scale=5.0,
+            num_inference_steps=50,
+            generator=torch.Generator(device=device).manual_seed(seed)
+        ).images[0]
+
+if __name__=="__main__":
+    pipe = FluxStableFlowPipeline(offload=False)
+    pipe.generate(prompt="Tokyo Tower looming over a night cityscape in Japan", seed=42)
+
 
 # @torch.no_grad()
 # def image2latent(self, image, latent_nudging_scalar = 1.15):
