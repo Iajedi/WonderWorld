@@ -10,7 +10,7 @@ dtype = torch.bfloat16
 MM_VITAL_BLOCKS = [0, 4]
 NUM_MM_BLOCKS = 5
 SINGLE_VITAL_BLOCKS = list(np.array([9, 10, 15, 24]) - NUM_MM_BLOCKS)
-
+# SINGLE_VITAL_BLOCKS = []
 class FluxStableFlowPipeline:
     def __init__(self, offload=False):
         self.pipe = Flux2KleinPipeline.from_pretrained("black-forest-labs/FLUX.2-klein-base-4B", torch_dtype=dtype)
@@ -32,7 +32,7 @@ class FluxStableFlowPipeline:
         ).images[0]
 
     @torch.no_grad()
-    def image2latent(self, image, latent_nudging_scalar = 1.15):
+    def image2latent(self, image, latent_nudging_scalar = 0.45):
         image = self.pipe.image_processor.preprocess(image).type(self.pipe.vae.dtype).to(device)
         latents = self.pipe._encode_vae_image(image, generator=None)
         latents = latents * latent_nudging_scalar
@@ -53,17 +53,20 @@ class FluxStableFlowPipeline:
             latents=self.image2latent(image),
             invert_image=True
         )
-        print(inverted_latent_list[0].shape)
 
         # Unpack latents using ids, tile
-        inverted_latents = self.pipe._unpack_latents_with_ids(inverted_latent_list[-1], latent_ids).tile(len(prompts), 1, 1, 1)
+        inverted_latent = self.pipe._unpack_latents_with_ids(inverted_latent_list[-1], latent_ids)
+        t = 1
+        # Prompt only: set to 0.4, ignore MM blocks
+        edit_latent = t * inverted_latent + (1 - t) * torch.randn_like(inverted_latent)
+        inverted_latents = torch.cat([inverted_latent, edit_latent])
 
         # Edit
         images = self.pipe(
             prompt=prompts,
             height=512,
             width=512,
-            guidance_scale=1.0,
+            guidance_scale=5.0,
             num_inference_steps=50,
             max_sequence_length=512,
             latents=inverted_latents,
@@ -80,7 +83,7 @@ class FluxStableFlowPipeline:
 
 if __name__=="__main__":
     pipe = FluxStableFlowPipeline(offload=False)
-    prompts = ["Tokyo Tower looming over a night cityscape", "Eiffel Tower looming over a night cityscape"]
+    prompts = ["Tokyo Tower in a night cityscape", "Statue of Liberty in a night cityscape"]
     image = Image.open("flux-klein.png")
     pipe.invert_and_save(image, prompts)
 

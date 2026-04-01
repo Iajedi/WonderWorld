@@ -14,7 +14,7 @@
 
 import inspect
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -337,10 +337,19 @@ class Flux2AttnProcessor:
         encoder_hidden_states: torch.Tensor = None,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
+        # Stable flow
+        step_index=None,
+        index_block=None,
+        mm_copy_blocks=None,
     ) -> torch.Tensor:
         query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
             attn, hidden_states, encoder_hidden_states
         )
+
+        inject_k_v = mm_copy_blocks is not None and index_block in mm_copy_blocks
+        if inject_k_v:
+            key[1:] = key[:1]
+            value[1:] = value[:1]
 
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
@@ -579,6 +588,10 @@ class Flux2ParallelSelfAttnProcessor:
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
+        step_index=None,
+        index_block=None,
+        single_copy_blocks=None,
+        max_seq_len: Optional[int] = None,
     ) -> torch.Tensor:
         # Parallel in (QKV + MLP in) projection
         hidden_states = attn.to_qkv_mlp_proj(hidden_states)
@@ -588,6 +601,11 @@ class Flux2ParallelSelfAttnProcessor:
 
         # Handle the attention logic
         query, key, value = qkv.chunk(3, dim=-1)
+
+        inject_k_v = single_copy_blocks is not None and index_block in single_copy_blocks
+        if inject_k_v and max_seq_len is not None:
+            key[1:, max_seq_len:] = key[:1, max_seq_len:]
+            value[1:, max_seq_len:] = value[:1, max_seq_len:]
 
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
@@ -844,6 +862,10 @@ class Flux2SingleTransformerBlock(nn.Module):
             attn_output = self.attn(
                 hidden_states=norm_hidden_states,
                 image_rotary_emb=image_rotary_emb,
+                step_index=None,
+                index_block=None,
+                single_copy_blocks=None,
+                max_seq_len=text_seq_len,
                 **joint_attention_kwargs,
             )
 
@@ -931,6 +953,9 @@ class Flux2TransformerBlock(nn.Module):
                 hidden_states=norm_hidden_states,
                 encoder_hidden_states=norm_encoder_hidden_states,
                 image_rotary_emb=image_rotary_emb,
+                step_index=None,
+                index_block=None,
+                mm_copy_blocks=None,
                 **joint_attention_kwargs,
             )
 
