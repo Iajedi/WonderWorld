@@ -577,8 +577,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
-        if guidance_scale > 1.0 and self.config.is_distilled:
-            logger.warning(f"Guidance scale {guidance_scale} is ignored for step-wise distilled models.")
+        if isinstance(guidance_scale, list):
+            scale = max(guidance_scale)
+        else:
+            scale = guidance_scale
+        if scale > 1.0 and self.config.is_distilled:
+            logger.warning(f"Guidance scale {scale} is ignored for step-wise distilled models.")
 
     @property
     def guidance_scale(self):
@@ -586,7 +590,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     @property
     def do_classifier_free_guidance(self):
-        return self._guidance_scale > 1 and not self.config.is_distilled
+        # Obtain the max guidance scale
+        if isinstance(self._guidance_scale, list):
+            guidance_scale = max(self._guidance_scale)
+        else:
+            guidance_scale = self._guidance_scale
+        return guidance_scale > 1 and not self.config.is_distilled
 
     @property
     def attention_kwargs(self):
@@ -614,7 +623,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         width: int | None = None,
         num_inference_steps: int = 50,
         sigmas: list[float] | None = None,
-        guidance_scale: float = 4.0,
+        guidance_scale: float | list[float] = 4.0,
         num_images_per_prompt: int = 1,
         generator: torch.Generator | list[torch.Generator] | None = None,
         latents: torch.Tensor | None = None,
@@ -627,10 +636,13 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
         text_encoder_out_layers: tuple[int] = (9, 18, 27),
+        invert_image: bool = False,
         mm_copy_blocks=None,
         single_copy_blocks=None,
         mm_skip_blocks=None,
         single_skip_blocks=None,
+        percentage_of_steps=1.0,
+        inverted_latent_list=None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -796,7 +808,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             latents=latents,
         )
         
-        print(f"{batch_size=} {num_channels_latents=} {height=} {width=} latent_shape={latents.shape}")
+        # print(f"{batch_size=} {num_channels_latents=} {height=} {width=} latent_shape={latents.shape}")
 
         image_latents = None
         image_latent_ids = None
@@ -825,6 +837,17 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
+        if invert_image:
+            timesteps = reversed(timesteps)
+            result_latent_list = []
+
+        if percentage_of_steps != 1:
+            end_timestep_idx = int(len(timesteps) * percentage_of_steps)
+            if invert_image:
+                timesteps = timesteps[:end_timestep_idx]
+            else:
+                timesteps = timesteps[len(timesteps) - end_timestep_idx:]
+
         # 7. Denoising loop
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
@@ -837,6 +860,16 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 self._current_timestep = t
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
+
+                # handle guidance
+                if self.transformer.config.guidance_embeds:
+                    if isinstance(guidance_scale, list):
+                        guidance = torch.tensor(guidance_scale, device=device)
+                    else:
+                        guidance = torch.tensor([guidance_scale], device=device)
+                        guidance = guidance.expand(latents.shape[0])
+                else:
+                    guidance = None
 
                 latent_model_input = latents.to(self.transformer.dtype)
                 latent_image_ids = latent_ids
@@ -881,7 +914,16 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                if invert_image:
+                    # compute the next noisy sample x_t-1 -> x_t
+                    # step_forward using forward inversion
+                    latents = self.scheduler.step_forward(noise_pred, t, latents, return_dict=False)[0]
+                    result_latent_list.append(latents)
+                else:
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    if inverted_latent_list is not None:
+                        latents[0] = inverted_latent_list[-i][0]
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
@@ -914,7 +956,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         )
         latents = latents * latents_bn_std + latents_bn_mean
         latents = self._unpatchify_latents(latents)
-        if output_type == "latent":
+        if output_type == "latent" or invert_image:
             image = latents
         else:
             image = self.vae.decode(latents, return_dict=False)[0]
@@ -922,6 +964,9 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         # Offload all models
         self.maybe_free_model_hooks()
+
+        if invert_image:
+            return result_latent_list, latent_image_ids
 
         if not return_dict:
             return (image,)

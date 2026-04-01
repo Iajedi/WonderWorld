@@ -17,7 +17,7 @@ class FluxStableFlowPipeline:
         if offload:
             self.pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
         else:
-            print(torch.cuda.is_available())
+            # print(torch.cuda.is_available())
             self.pipe.to(device)
 
     @torch.no_grad
@@ -31,10 +31,58 @@ class FluxStableFlowPipeline:
             generator=torch.Generator(device=device).manual_seed(seed)
         ).images[0]
 
+    @torch.no_grad()
+    def image2latent(self, image, latent_nudging_scalar = 1.15):
+        image = self.pipe.image_processor.preprocess(image).type(self.pipe.vae.dtype).to(device)
+        latents = self.pipe._encode_vae_image(image, generator=None)
+        latents = latents * latent_nudging_scalar
+
+        return latents
+    
+    @torch.no_grad()
+    def invert_and_save(self, image, prompts):
+        inversion_prompt = prompts[0:1]
+        # Invert
+        inverted_latent_list, latent_ids = self.pipe(
+            prompt=inversion_prompt,
+            height=512,
+            width=512,
+            guidance_scale=1.0,
+            num_inference_steps=50,
+            max_sequence_length=512,
+            latents=self.image2latent(image),
+            invert_image=True
+        )
+        print(inverted_latent_list[0].shape)
+
+        # Unpack latents using ids, tile
+        inverted_latents = self.pipe._unpack_latents_with_ids(inverted_latent_list[-1], latent_ids).tile(len(prompts), 1, 1, 1)
+
+        # Edit
+        images = self.pipe(
+            prompt=prompts,
+            height=512,
+            width=512,
+            guidance_scale=1.0,
+            num_inference_steps=50,
+            max_sequence_length=512,
+            latents=inverted_latents,
+            inverted_latent_list=inverted_latent_list,
+            mm_copy_blocks=MM_VITAL_BLOCKS,
+            single_copy_blocks=SINGLE_VITAL_BLOCKS,
+        ).images
+        images = [np.array(img) for img in images]
+        res = Image.fromarray(np.hstack((images)))
+        res.save("edited.png")
+
+
+
+
 if __name__=="__main__":
     pipe = FluxStableFlowPipeline(offload=False)
-    pipe.generate(prompt="Tokyo Tower looming over a night cityscape in Japan", seed=42)
-
+    prompts = ["Tokyo Tower looming over a night cityscape", "Eiffel Tower looming over a night cityscape"]
+    image = Image.open("flux-klein.png")
+    pipe.invert_and_save(image, prompts)
 
 # @torch.no_grad()
 # def image2latent(self, image, latent_nudging_scalar = 1.15):
