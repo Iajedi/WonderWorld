@@ -966,7 +966,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         self.maybe_free_model_hooks()
 
         if invert_image:
-            return result_latent_list, latent_image_ids
+            return image, result_latent_list, latent_image_ids
 
         if not return_dict:
             return (image,)
