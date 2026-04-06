@@ -3,8 +3,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import math
+import os
 import torch
 import numpy as np
+from PIL import Image
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler, DDIMScheduler
 from diffusers.utils import BaseOutput
@@ -24,12 +26,123 @@ class UniEditDDIMSchedulerOutput(BaseOutput):
 
 class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.debug_save_masks = False
+        self.debug_print_mask_stats = False
+        self.debug_mask_save_every = 5
+        self.debug_mask_dir = "outputs/masks"
+        self.mask_token_shape = None
+        self.external_guidance_mask = None
 
     def set_hyperparameters(self, omega=5, alpha=1):
         self.omega = omega
         self.alpha = alpha
+
+    def set_debug_options(
+        self,
+        save_masks: bool = False,
+        print_mask_stats: bool = False,
+        mask_save_every: int = 5,
+        mask_dir: str = "outputs/masks",
+    ):
+        self.debug_save_masks = save_masks
+        self.debug_print_mask_stats = print_mask_stats
+        self.debug_mask_save_every = max(1, int(mask_save_every))
+        self.debug_mask_dir = mask_dir
+
+    def set_mask_token_shape(self, height: int, width: int):
+        if height is None or width is None:
+            self.mask_token_shape = None
+            return
+        self.mask_token_shape = (int(height), int(width))
+
+    def set_external_guidance_mask(self, mask: Optional[torch.Tensor]):
+        self.external_guidance_mask = mask
+
+    def _normalize_mask(self, mask: torch.Tensor):
+        batch_size = mask.shape[0]
+        if len(mask.shape) == 4:
+            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1)
+            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1)
+        elif len(mask.shape) == 5:
+            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
+            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
+        elif len(mask.shape) == 3:
+            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1)
+            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1)
+        else:
+            raise ValueError(f"Unsupported mask shape for normalization: {mask.shape}")
+        return (mask - mask_min) / (mask_max - mask_min + 1e-7)
+
+    def _reshape_mask_for_visualization(self, mask_2d_tokens: torch.Tensor):
+        num_tokens = mask_2d_tokens.shape[0]
+        if self.mask_token_shape is not None:
+            h, w = self.mask_token_shape
+            if h * w == num_tokens:
+                return mask_2d_tokens.reshape(h, w)
+        side = int(math.sqrt(num_tokens))
+        if side * side == num_tokens:
+            return mask_2d_tokens.reshape(side, side)
+        return None
+
+    def _save_mask_visualizations(self, mask: torch.Tensor, step_idx: int):
+        if not self.debug_save_masks:
+            return
+        if step_idx % self.debug_mask_save_every != 0:
+            return
+        os.makedirs(self.debug_mask_dir, exist_ok=True)
+        mask_cpu = mask.detach().float().cpu()
+        for b in range(mask_cpu.shape[0]):
+            batch_mask = mask_cpu[b]
+            if batch_mask.ndim == 2 and batch_mask.shape[-1] == 1:
+                reshaped = self._reshape_mask_for_visualization(batch_mask[:, 0])
+            elif batch_mask.ndim == 3 and batch_mask.shape[0] == 1:
+                reshaped = batch_mask[0]
+            else:
+                reshaped = None
+            if reshaped is None:
+                continue
+            mask_img = (reshaped.clamp(0, 1).numpy() * 255.0).astype(np.uint8)
+            Image.fromarray(mask_img, mode="L").save(
+                os.path.join(self.debug_mask_dir, f"mask_step_{step_idx:03d}_batch_{b}.png")
+            )
+
+    def _print_mask_stats(self, mask: torch.Tensor, step_idx: int, timestep, sigma, sigma_next):
+        if not self.debug_print_mask_stats:
+            return
+        mask_detached = mask.detach().float()
+        mins = mask_detached.reshape(mask_detached.shape[0], -1).min(dim=1).values
+        maxs = mask_detached.reshape(mask_detached.shape[0], -1).max(dim=1).values
+        print(
+            f"[UniEditMaskDebug] step={step_idx} timestep={float(timestep):.4f} "
+            f"sigma={float(sigma):.6f} sigma_next={float(sigma_next):.6f} "
+            f"shape={tuple(mask_detached.shape)} "
+            f"min={mins.tolist()} max={maxs.tolist()}"
+        )
+
+    def _get_effective_mask(self, guidance: torch.Tensor):
+        if self.external_guidance_mask is not None:
+            mask = self.external_guidance_mask.to(device=guidance.device, dtype=guidance.dtype)
+            if mask.shape[0] == 1 and guidance.shape[0] > 1:
+                mask = mask.expand(guidance.shape[0], -1, -1)
+            if mask.shape != (guidance.shape[0], guidance.shape[1], 1):
+                raise ValueError(
+                    "External guidance mask must have shape "
+                    f"(B, N, 1) matching guidance tokens, got {tuple(mask.shape)} "
+                    f"expected {(guidance.shape[0], guidance.shape[1], 1)}"
+                )
+            return mask.clamp(0, 1)
+
+        if len(guidance.shape) == 4:
+            mask = guidance.mean(dim=1, keepdim=True)
+        elif len(guidance.shape) == 5:
+            mask = guidance.mean(dim=1, keepdim=True)
+        elif len(guidance.shape) == 3:
+            mask = guidance.mean(dim=2, keepdim=True)
+        else:
+            raise ValueError(f"Unsupported guidance shape for mask generation: {guidance.shape}")
+        return self._normalize_mask(mask)
     
     def set_timesteps(
         self,
@@ -116,29 +229,20 @@ class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
 
         sigma = self.sigmas[self.step_index]
         sigma_next = self.sigmas[self.step_index + 1]
+        step_idx = self.step_index
             
         # batch level chunk
         v_src, v_trg = model_output.chunk(2, dim=0)
         guidance = v_trg - v_src
-        batch_size = guidance.shape[0]
-        
-        # mask, [B, C, H, W] for SD3, [B, N, C] for FLUX
-        if len(guidance.shape) == 4:
-            mask = guidance.mean(dim=1, keepdim=True)
-            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1)
-            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1)
-        elif len(guidance.shape) == 5:
-            mask = guidance.mean(dim=1, keepdim=True)
-            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
-            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
-        elif len(guidance.shape) == 3:
-            mask = guidance.mean(dim=2, keepdim=True)
-            mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1)
-            mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1)
-        mask = (mask - mask_min) / (mask_max - mask_min + 1e-7)
+        mask = self._get_effective_mask(guidance)
+        self._print_mask_stats(mask, step_idx, timestep, sigma, sigma_next)
+        self._save_mask_visualizations(mask, step_idx)
         
         # correction
-        stride_corr = self.omega * (sigma_next - sigma) * (1 + mask) * guidance
+        if self.external_guidance_mask is not None:
+            stride_corr = self.omega * (sigma_next - sigma) * self.external_guidance_mask * guidance
+        else:
+            stride_corr = self.omega * (sigma_next - sigma) * (1 + mask) * guidance
         
         # velocity fusion
         velocity_fusion = mask * v_trg + (1 - mask) * v_src

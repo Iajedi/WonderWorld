@@ -862,9 +862,9 @@ class Flux2SingleTransformerBlock(nn.Module):
             attn_output = self.attn(
                 hidden_states=norm_hidden_states,
                 image_rotary_emb=image_rotary_emb,
-                step_index=None,
-                index_block=None,
-                single_copy_blocks=None,
+                step_index=step_index,
+                index_block=index_block,
+                single_copy_blocks=single_copy_blocks,
                 max_seq_len=text_seq_len,
                 **joint_attention_kwargs,
             )
@@ -948,14 +948,13 @@ class Flux2TransformerBlock(nn.Module):
             norm_encoder_hidden_states = (1 + c_scale_msa) * norm_encoder_hidden_states + c_shift_msa
 
             # Attention on concatenated img + txt stream
-            # TODO: Stable flow attention copy
             attention_outputs = self.attn(
                 hidden_states=norm_hidden_states,
                 encoder_hidden_states=norm_encoder_hidden_states,
                 image_rotary_emb=image_rotary_emb,
-                step_index=None,
-                index_block=None,
-                mm_copy_blocks=None,
+                step_index=step_index,
+                index_block=index_block,
+                mm_copy_blocks=mm_copy_blocks,
                 **joint_attention_kwargs,
             )
 

@@ -851,7 +851,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # 7. Denoising loop
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
-        self.scheduler.set_begin_index(0)
+        # When inverting, leave _begin_index=None so _init_step_index uses
+        # index_for_timestep to find the correct starting position (N-1)
+        # for the reversed sigma schedule.
+        if not invert_image:
+            self.scheduler.set_begin_index(0)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -923,7 +927,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     # compute the previous noisy sample x_t -> x_t-1
                     latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                     if inverted_latent_list is not None:
-                        latents[0] = inverted_latent_list[-i][0]
+                        latents[0] = inverted_latent_list[-(i + 1)][0]
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():

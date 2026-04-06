@@ -23,8 +23,8 @@ class UniInvDDIMSchedulerOutput(BaseOutput):
 
 class UniInvEulerScheduler(FlowMatchEulerDiscreteScheduler):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def set_hyperparameters(self, zero_initial=False, alpha=1):
         self.zero_initial = zero_initial
