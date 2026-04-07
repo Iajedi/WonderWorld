@@ -1,0 +1,42 @@
+# BCOT-HVE inpainting configuration
+# Mask convention: 1 = unknown (hole), 0 = known (keep)
+
+# Diffusion schedule
+T: 50               # total denoising steps
+K: 10               # warm-start steps
+
+# Warm-start method: none | kv_replace | masked_attention | ot_only | ot_harmonic
+warm_method: ot_harmonic
+
+# Optimal transport
+lambda_pos: 0.1      # positional distance weight in cost matrix
+lambda_bdry: 1.0     # boundary-distance penalty weight
+tau: 0.05            # Sinkhorn entropy regularisation
+sinkhorn_iters: 100  # Sinkhorn iterations
+
+# Harmonic extension
+lambda_s: 0.5        # screening strength (data fidelity vs smoothness)
+connectivity: 8      # grid adjacency for Laplacian (4 or 8)
+
+# Alpha schedule (blending transported vs target velocity)
+alpha_start: 0.96     # first warm step: heavily favour transported
+alpha_end: 0.6        # last warm step: shift toward target
+
+# Boundary band
+boundary_band_width: 2   # known-side band width for boundary penalty
+
+# Transformer layers to hook during warm-start
+warm_layers:
+  - [double, 0]
+  - [double, 4]
+  - [single, 4]
+  - [single, 5]
+  - [single, 15]
+  - [single, 19]
+
+# UniEdit-Flow editing phase
+omega: 4.0           # guidance correction strength
+alpha_edit: 0.8      # schedule truncation for edit phase (1.0 = full)
+
+# Debug
+debug: false
