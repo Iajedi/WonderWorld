@@ -78,13 +78,14 @@ class BCOTHVEPipeline:
         prompt_src: str,
         prompt_tgt: str,
         config: Dict[str, Any],
-        output_dir: str = "outputs/bcot_hve",
+        output_dir: Optional[str] = None,
     ) -> Image.Image:
         """Execute the full four-phase BCOT-HVE pipeline.
 
         Returns the final decoded PIL image.
         """
-        os.makedirs(output_dir, exist_ok=True)
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
 
         T = int(config.get("T", 50))
         K = int(config.get("K", 10))
@@ -186,7 +187,7 @@ class BCOTHVEPipeline:
         m = mask_token  # [1, N, 1]
         z_packed = (1.0 - m) * z_packed + m * torch.cat([eps, eps], dim=0)
 
-        if debug:
+        if debug and output_dir is not None:
             torch.save(z_packed.cpu(), os.path.join(output_dir, "z_before_warmstart.pt"))
 
         # ------------------------------------------------------------------
@@ -214,7 +215,7 @@ class BCOTHVEPipeline:
             sigmas_warm = all_sigmas[: K + 1].clone()
 
             config_with_hw = {**config, "token_hw": token_hw}
-            debug_warmdir = os.path.join(output_dir, "warm_debug") if debug else None
+            debug_warmdir = os.path.join(output_dir, "warm_debug") if (debug and output_dir is not None) else None
 
             z_packed = warm_start_loop(
                 pipe=pipe,
@@ -230,7 +231,7 @@ class BCOTHVEPipeline:
                 debug_dir=debug_warmdir,
             )
 
-        if debug:
+        if debug and output_dir is not None:
             torch.save(z_packed.cpu(), os.path.join(output_dir, "z_after_warmstart.pt"))
 
         # ------------------------------------------------------------------
@@ -276,7 +277,8 @@ class BCOTHVEPipeline:
         # ------------------------------------------------------------------
         # Phase D: save outputs
         # ------------------------------------------------------------------
-        result_image.save(os.path.join(output_dir, "result.png"))
+        if output_dir is not None:
+            result_image.save(os.path.join(output_dir, "result.png"))
 
         if debug:
             self._save_debug_outputs(image, result_image, mask_np, token_hw, output_dir)
@@ -301,7 +303,7 @@ class BCOTHVEPipeline:
         prompt_src: str,
         prompt_tgt: str,
         debug: bool,
-        output_dir: str,
+        output_dir: Optional[str] = None,
     ) -> Image.Image:
         """Original Phase C: delegate to the pipeline black-box."""
         tok_h, tok_w = token_hw
@@ -310,10 +312,10 @@ class BCOTHVEPipeline:
 
         self.wrapper.edit_scheduler.set_hyperparameters(alpha=skip_alpha, omega=omega)
         self.wrapper.edit_scheduler.set_debug_options(
-            save_masks=debug,
+            save_masks=debug and output_dir is not None,
             print_mask_stats=False,
             mask_save_every=5,
-            mask_dir=os.path.join(output_dir, "edit_masks"),
+            mask_dir=os.path.join(output_dir, "edit_masks") if (output_dir is not None) else None,
         )
         self.wrapper.edit_scheduler.set_mask_token_shape(tok_h, tok_w)
 
@@ -381,10 +383,10 @@ class BCOTHVEPipeline:
         # -- Configure edit scheduler --
         self.wrapper.edit_scheduler.set_hyperparameters(alpha=skip_alpha, omega=omega)
         self.wrapper.edit_scheduler.set_debug_options(
-            save_masks=debug,
+            save_masks=debug and output_dir is not None,
             print_mask_stats=False,
             mask_save_every=5,
-            mask_dir=os.path.join(output_dir, "edit_masks"),
+            mask_dir=os.path.join(output_dir, "edit_masks") if (output_dir is not None) else None,
         )
         self.wrapper.edit_scheduler.set_mask_token_shape(tok_h, tok_w)
 
@@ -541,14 +543,16 @@ class BCOTHVEPipeline:
         result: Image.Image,
         mask_np: np.ndarray,
         token_hw: Tuple[int, int],
-        output_dir: str,
+        output_dir: Optional[str] = None,
     ) -> None:
-        original.save(os.path.join(output_dir, "original_masked.png"))
-        m_vis = (mask_np.squeeze() * 255).astype(np.uint8)
-        Image.fromarray(m_vis, mode="L").save(os.path.join(output_dir, "mask.png"))
+        """Save debug outputs to the output directory."""
+        if output_dir is not None:
+            original.save(os.path.join(output_dir, "original_masked.png"))
+            m_vis = (mask_np.squeeze() * 255).astype(np.uint8)
+            Image.fromarray(m_vis, mode="L").save(os.path.join(output_dir, "mask.png"))
 
-        metrics = self.compute_metrics(original, result, mask_np)
-        with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
-            for k, v in metrics.items():
-                f.write(f"{k}: {v:.6f}\n")
-        print(f"[BCOT-HVE] Metrics: {metrics}")
+            metrics = self.compute_metrics(original, result, mask_np)
+            with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
+                for k, v in metrics.items():
+                    f.write(f"{k}: {v:.6f}\n")
+            print(f"[BCOT-HVE] Metrics: {metrics}")

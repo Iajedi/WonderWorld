@@ -14,14 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from edit.observed_reinject import reinject_observed_tokens
-from utils.mask_ops import (
-    dilate_token_mask,
-    mask_to_token_space,
-    reinject_mask_token_expanded_unknown,
-)
+from utils.mask_ops import mask_to_token_space
 
 device = "cuda"
 dtype = torch.bfloat16
@@ -37,6 +34,21 @@ def _compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     a = (m_200 - m_10) / 190.0
     b = m_200 - 200.0 * a
     return float(a * num_steps + b)
+
+
+def dilate_token_mask(
+    mask_token: torch.Tensor,
+    token_hw: Tuple[int, int],
+    dilate_pixels: int,
+) -> torch.Tensor:
+    """Dilate the unknown region of a ``[1, N, 1]`` token mask."""
+    if dilate_pixels <= 0:
+        return mask_token
+    H, W = token_hw
+    m_2d = mask_token[:, :, 0].reshape(1, 1, H, W).float()
+    k = 2 * dilate_pixels + 1
+    m_2d = F.max_pool2d(m_2d, kernel_size=k, stride=1, padding=dilate_pixels)
+    return m_2d.reshape(1, H * W, 1).to(mask_token.dtype)
 
 
 # ------------------------------------------------------------------
@@ -237,9 +249,9 @@ def run_uniedit_phase(
 
     Parameters
     ----------
-    mask_token_override : if given, used as the base reinject mask instead of
-        ``reinject_mask_token_expanded_unknown(mask_np, …)``.  ``reinject_mask_dilate``
-        is still applied.  ``reinject_unknown_expand_px`` is ignored in that case.
+    mask_token_override : if given, used as the reinject mask instead of
+        building one from *mask_np*.  Useful when the geometric pipeline
+        has already built a composite reinject mask.
     """
     T = int(config.get("T", 50))
     K = int(config.get("K", 0))
@@ -249,32 +261,22 @@ def run_uniedit_phase(
     debug = config.get("debug", False)
     observed_reinject = config.get("observed_reinject", False) and len(session.inv_trajectory) > 0
     reinject_mask_dilate = int(config.get("reinject_mask_dilate", 0))
-    reinject_unknown_expand_px = int(config.get("reinject_unknown_expand_px", 0))
 
     tok_h, tok_w = session.token_hw
 
     if observed_reinject:
-        if mask_token_override is not None:
-            m_base = mask_token_override
-        else:
-            m_base = reinject_mask_token_expanded_unknown(
-                mask_np,
-                session.token_hw,
-                1,
-                z_packed.device,
-                z_packed.dtype,
-                reinject_unknown_expand_px,
-            )
-        reinject_mask_token = dilate_token_mask(m_base, session.token_hw, reinject_mask_dilate)
+        mask_token = mask_token_override if mask_token_override is not None else \
+            mask_to_token_space(mask_np, session.token_hw, 1, z_packed.device, z_packed.dtype)
         z_out, img = _edit_with_reinject(
             session=session,
             z_packed=z_packed,
-            reinject_mask_token=reinject_mask_token,
+            mask_token=mask_token,
             mask_np=mask_np,
             prompt_src=prompt_src,
             prompt_tgt=prompt_tgt,
             T=T, K=K, omega=omega,
             skip_alpha=skip_alpha,
+            reinject_mask_dilate=reinject_mask_dilate,
             debug=debug,
             output_dir=output_dir,
         )
@@ -338,7 +340,7 @@ def _edit_via_pipe(
 def _edit_with_reinject(
     session: EditingSession,
     z_packed: torch.Tensor,
-    reinject_mask_token: torch.Tensor,
+    mask_token: torch.Tensor,
     mask_np: np.ndarray,
     prompt_src: str,
     prompt_tgt: str,
@@ -346,6 +348,7 @@ def _edit_with_reinject(
     K: int,
     omega: float,
     skip_alpha: float,
+    reinject_mask_dilate: int,
     debug: bool,
     output_dir: str,
 ) -> Tuple[torch.Tensor, Image.Image]:
@@ -384,14 +387,14 @@ def _edit_with_reinject(
     edit_sched._step_index = 0
     edit_sched._begin_index = 0
 
-    m = reinject_mask_token
+    m_reinject = dilate_token_mask(mask_token, session.token_hw, reinject_mask_dilate)
     inv_trajectory = session.inv_trajectory
 
     z = z_packed
     for j, t in enumerate(timesteps):
         reinject_idx = max(0, min(T - K - j, len(inv_trajectory) - 1))
         z_inv_batch = inv_trajectory[reinject_idx].expand(2, -1, -1)
-        z = reinject_observed_tokens(z, z_inv_batch, m)
+        z = reinject_observed_tokens(z, z_inv_batch, m_reinject)
 
         timestep = t.expand(z.shape[0]).to(z.dtype)
         noise_pred = pipe.transformer(
@@ -409,7 +412,7 @@ def _edit_with_reinject(
 
     if len(inv_trajectory) > 0:
         z_clean = inv_trajectory[0].expand(2, -1, -1)
-        z = reinject_observed_tokens(z, z_clean, m)
+        z = reinject_observed_tokens(z, z_clean, m_reinject)
 
     img = decode_latent(session, z)
     return z, img
