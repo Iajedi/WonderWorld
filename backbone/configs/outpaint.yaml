@@ -36,5 +36,10 @@ warm_layers:
 omega: 5.0
 alpha_edit: 0.8
 
+# Observed-region reinjection
+observed_reinject: true
+reinject_unknown_expand_px: 12
+reinject_mask_dilate: 0
+
 # Debug
 debug: true

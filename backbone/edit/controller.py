@@ -3,6 +3,11 @@
 Wraps the existing Flux2UniEditFlowPipeline (or FluxUniEditFlowPipeline)
 and inserts a K-step warm-start phase before the standard UniEdit-Flow
 editing loop.  No existing scheduler or pipeline code is modified.
+
+Observed-region reinjection: at every post-warm-start denoising step,
+the observed (known) region latent is hard-replaced with the
+corresponding tokens from the stored inversion trajectory, preventing
+colorimetric drift.
 """
 
 from __future__ import annotations
@@ -17,12 +22,15 @@ import torch.nn.functional as F
 from PIL import Image
 
 from edit.warm_start import warm_start_loop
+from edit.observed_reinject import reinject_observed_tokens
 from utils.mask_ops import (
     infer_token_hw,
     mask_to_token_space,
     resize_mask_to_latent,
     mask_2d_from_token_mask,
     extract_boundary_band,
+    reinject_mask_token_expanded_unknown,
+    dilate_token_mask,
 )
 
 device = "cuda"
@@ -85,6 +93,7 @@ class BCOTHVEPipeline:
         alpha_edit = float(config.get("alpha_edit", 0.8))
         skip_alpha = (T - K) / T if K > 0 else alpha_edit
         debug = config.get("debug", False)
+        observed_reinject = config.get("observed_reinject", False)
 
         warm_layers: List[Tuple[str, int]] = []
         for entry in config.get("warm_layers", [["double", 2], ["double", 4]]):
@@ -113,10 +122,17 @@ class BCOTHVEPipeline:
 
         # VAE encode
         image_latent, latent_ids = self.wrapper.image2latent(image)
-        # image_latent is [1, C, H_tok, W_tok] (4-D patchified)
 
-        # Invert for alpha * T steps
-        from uniedit_flow_schedulers.UniInvEulerScheduler import UniInvEulerScheduler
+        # -- Inversion with optional trajectory capture ----
+        inv_trajectory: List[torch.Tensor] = []
+
+        def _inv_callback(pipe_self, step, timestep, callback_kwargs):
+            """Store scheduler.sample (true state) at each inversion step."""
+            z = pipe_self.scheduler.sample
+            if z is not None:
+                inv_trajectory.append(z.clone().to(dtype))
+            return callback_kwargs
+
         self.wrapper.invert_scheduler.set_hyperparameters(alpha=1.0)
         pipe.scheduler = self.wrapper.invert_scheduler
         invert_noise_latent = pipe(
@@ -127,6 +143,8 @@ class BCOTHVEPipeline:
             output_type="latent",
             height=512,
             width=512,
+            callback_on_step_end=_inv_callback if observed_reinject else None,
+            callback_on_step_end_tensor_inputs=["latents"],
         ).images
 
         if self.model_type == "klein":
@@ -147,6 +165,21 @@ class BCOTHVEPipeline:
         mask_token = mask_to_token_space(
             mask_np, token_hw, batch_size=1, device=z_packed.device, dtype=z_packed.dtype,
         )
+
+        reinject_expand_px = int(config.get("reinject_unknown_expand_px", 0))
+        reinject_mask_dilate = int(config.get("reinject_mask_dilate", 0))
+        mask_token_reinject = reinject_mask_token_expanded_unknown(
+            mask_np,
+            token_hw,
+            batch_size=1,
+            device=z_packed.device,
+            dtype=z_packed.dtype,
+            expand_unknown_pixels=reinject_expand_px,
+        )
+        if reinject_mask_dilate > 0:
+            mask_token_reinject = dilate_token_mask(
+                mask_token_reinject, token_hw, reinject_mask_dilate
+            )
 
         # Replace unknown region with Gaussian noise
         eps = torch.randn_like(z_packed[:1])  # [1, N, C]
@@ -201,13 +234,81 @@ class BCOTHVEPipeline:
             torch.save(z_packed.cpu(), os.path.join(output_dir, "z_after_warmstart.pt"))
 
         # ------------------------------------------------------------------
-        # Phase C: standard UniEdit-Flow for the remaining T-K steps
+        # Phase C: UniEdit-Flow for the remaining T-K steps
+        #   When observed_reinject=True, a manual loop replaces the
+        #   black-box pipe() call so we can inject inversion-trajectory
+        #   tokens into the observed region before each velocity prediction.
         # ------------------------------------------------------------------
-        # Unpack from [2, N, C] back to [2, C, H_tok, W_tok]
+        if observed_reinject:
+            result_image = self._edit_with_reinject(
+                pipe=pipe,
+                z_packed=z_packed,
+                reinject_mask_token=mask_token_reinject,
+                mask_np=mask_np,
+                inv_trajectory=inv_trajectory,
+                prompt_src=prompt_src,
+                prompt_tgt=prompt_tgt,
+                edit_init_latent=edit_init_latent,
+                token_hw=token_hw,
+                T=T,
+                K=K,
+                omega=omega,
+                skip_alpha=skip_alpha,
+                debug=debug,
+                output_dir=output_dir,
+            )
+        else:
+            result_image = self._edit_via_pipe(
+                pipe=pipe,
+                z_packed=z_packed,
+                mask_np=mask_np,
+                edit_init_latent=edit_init_latent,
+                token_hw=token_hw,
+                T=T,
+                omega=omega,
+                skip_alpha=skip_alpha,
+                prompt_src=prompt_src,
+                prompt_tgt=prompt_tgt,
+                debug=debug,
+                output_dir=output_dir,
+            )
+
+        # ------------------------------------------------------------------
+        # Phase D: save outputs
+        # ------------------------------------------------------------------
+        result_image.save(os.path.join(output_dir, "result.png"))
+
+        if debug:
+            self._save_debug_outputs(image, result_image, mask_np, token_hw, output_dir)
+
+        return result_image
+
+    # ------------------------------------------------------------------
+    # Phase C helpers
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _edit_via_pipe(
+        self,
+        pipe,
+        z_packed: torch.Tensor,
+        mask_np: np.ndarray,
+        edit_init_latent: torch.Tensor,
+        token_hw: Tuple[int, int],
+        T: int,
+        omega: float,
+        skip_alpha: float,
+        prompt_src: str,
+        prompt_tgt: str,
+        debug: bool,
+        output_dir: str,
+    ) -> Image.Image:
+        """Original Phase C: delegate to the pipeline black-box."""
+        tok_h, tok_w = token_hw
+        C_lat = edit_init_latent.shape[1]
         z_4d = z_packed.permute(0, 2, 1).reshape(2, C_lat, tok_h, tok_w)
 
         self.wrapper.edit_scheduler.set_hyperparameters(alpha=skip_alpha, omega=omega)
-
         self.wrapper.edit_scheduler.set_debug_options(
             save_masks=debug,
             print_mask_stats=False,
@@ -227,7 +328,7 @@ class BCOTHVEPipeline:
         self.wrapper.edit_scheduler.set_external_guidance_mask(external_mask)
 
         pipe.scheduler = self.wrapper.edit_scheduler
-        result_image = pipe(
+        return pipe(
             prompt=[prompt_src, prompt_tgt],
             num_inference_steps=T,
             guidance_scale=1.0,
@@ -237,13 +338,143 @@ class BCOTHVEPipeline:
             width=512,
         ).images[0]
 
-        # ------------------------------------------------------------------
-        # Phase D: save outputs
-        # ------------------------------------------------------------------
-        result_image.save(os.path.join(output_dir, "result.png"))
+    @torch.no_grad()
+    def _edit_with_reinject(
+        self,
+        pipe,
+        z_packed: torch.Tensor,
+        reinject_mask_token: torch.Tensor,
+        mask_np: np.ndarray,
+        inv_trajectory: List[torch.Tensor],
+        prompt_src: str,
+        prompt_tgt: str,
+        edit_init_latent: torch.Tensor,
+        token_hw: Tuple[int, int],
+        T: int,
+        K: int,
+        omega: float,
+        skip_alpha: float,
+        debug: bool,
+        output_dir: str,
+    ) -> Image.Image:
+        """Phase C with observed-region reinjection from inversion trajectory.
+
+        Replaces the black-box pipe() call with a manual denoising loop
+        that reinjects observed-region tokens before each transformer call.
+
+        ``reinject_mask_token`` may widen the unknown region versus the
+        edit-phase mask (see ``reinject_unknown_expand_px``) so boundary
+        tokens are not forced to inversion latents that saw composite bleed.
+        """
+        tok_h, tok_w = token_hw
+        N = z_packed.shape[1]
+
+        # -- Prepare prompt embeddings & IDs --
+        prompt_embeds, text_ids = pipe.encode_prompt(
+            prompt=[prompt_src, prompt_tgt],
+            device=z_packed.device,
+            num_images_per_prompt=1,
+            max_sequence_length=512,
+        )
+        latent_image_ids = pipe._prepare_latent_ids(edit_init_latent).to(z_packed.device)
+
+        # -- Configure edit scheduler --
+        self.wrapper.edit_scheduler.set_hyperparameters(alpha=skip_alpha, omega=omega)
+        self.wrapper.edit_scheduler.set_debug_options(
+            save_masks=debug,
+            print_mask_stats=False,
+            mask_save_every=5,
+            mask_dir=os.path.join(output_dir, "edit_masks"),
+        )
+        self.wrapper.edit_scheduler.set_mask_token_shape(tok_h, tok_w)
+
+        from flux_pipeline import _manual_mask_to_token_space
+        external_mask = _manual_mask_to_token_space(
+            manual_mask=mask_np,
+            latent_hw=(tok_h, tok_w),
+            batch_size=1,
+            device=z_packed.device,
+            dtype=z_packed.dtype,
+        )
+        self.wrapper.edit_scheduler.set_external_guidance_mask(external_mask)
+
+        # -- Set up sigma schedule --
+        edit_sched = self.wrapper.edit_scheduler
+        sigmas_np = np.linspace(1.0, 1.0 / T, T)
+        mu = _compute_empirical_mu(image_seq_len=N, num_steps=T)
+        edit_sched.set_timesteps(T, device=z_packed.device, sigmas=sigmas_np, mu=mu)
+        timesteps = edit_sched.timesteps
+        num_edit_steps = len(timesteps)
+        edit_sched._step_index = 0
+        edit_sched._begin_index = 0
 
         if debug:
-            self._save_debug_outputs(image, result_image, mask_np, token_hw, output_dir)
+            print(
+                f"[reinject] T={T} K={K} edit_steps={num_edit_steps} "
+                f"inv_traj_len={len(inv_trajectory)} "
+                f"sigma_range=[{float(edit_sched.sigmas[0]):.4f}, "
+                f"{float(edit_sched.sigmas[-1]):.4f}]"
+            )
+
+        m = reinject_mask_token  # [1, N, 1], 1=unknown 0=observed (may widen hole vs. edit mask)
+        z = z_packed    # [2, N, C]
+
+        # -- Manual denoising loop with reinjection --
+        for j, t in enumerate(timesteps):
+            # Index into inv_trajectory: map edit step j → inversion step
+            reinject_idx = T - K - j
+            reinject_idx = max(0, min(reinject_idx, len(inv_trajectory) - 1))
+            z_inv = inv_trajectory[reinject_idx]  # [1, N, C]
+            z_inv_batch = z_inv.expand(2, -1, -1)  # [2, N, C]
+
+            # Reinject observed tokens from inversion trajectory
+            z = reinject_observed_tokens(z, z_inv_batch, m)
+
+            if debug and j % 10 == 0:
+                obs_diff = (z[:1] - z_inv)[:, m[0, :, 0] < 0.5, :].abs().mean()
+                print(
+                    f"[reinject] step {j}/{num_edit_steps} "
+                    f"reinject_idx={reinject_idx} "
+                    f"obs_region_diff={obs_diff:.6f}"
+                )
+
+            # Transformer forward
+            timestep = t.expand(z.shape[0]).to(z.dtype)
+            noise_pred = pipe.transformer(
+                hidden_states=z.to(pipe.transformer.dtype),
+                timestep=timestep / 1000.0,
+                guidance=None,
+                encoder_hidden_states=prompt_embeds,
+                txt_ids=text_ids,
+                img_ids=latent_image_ids,
+                joint_attention_kwargs=None,
+                return_dict=False,
+            )[0]
+            noise_pred = noise_pred[:, :N, :]
+
+            # Scheduler step (UniEditEulerScheduler handles velocity fusion)
+            z = edit_sched.step(noise_pred, t, z, return_dict=False)[0]
+
+        # Final reinjection: restore observed region to clean-image tokens
+        # (inv_trajectory[0] = z at sigma=0, the original image latent)
+        if len(inv_trajectory) > 0:
+            z_clean = inv_trajectory[0].expand(2, -1, -1)
+            z = reinject_observed_tokens(z, z_clean, m)
+
+        # -- Decode --
+        z_src = z[:1]  # [1, N, C]
+        ids_src = latent_image_ids[:1]  # [1, N, 4]
+        z_4d = pipe._unpack_latents_with_ids(z_src, ids_src)  # [1, C_patch, H, W]
+
+        bn_mean = pipe.vae.bn.running_mean.view(1, -1, 1, 1).to(z_4d.device, z_4d.dtype)
+        bn_std = torch.sqrt(
+            pipe.vae.bn.running_var.view(1, -1, 1, 1) + pipe.vae.config.batch_norm_eps
+        ).to(z_4d.device, z_4d.dtype)
+        z_4d = z_4d * bn_std + bn_mean
+
+        z_4d = pipe._unpatchify_latents(z_4d)
+        decoded = pipe.vae.decode(z_4d, return_dict=False)[0]
+        result_image = pipe.image_processor.postprocess(decoded, output_type="pil")[0]
 
         return result_image
 

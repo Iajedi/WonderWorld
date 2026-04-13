@@ -23,7 +23,7 @@ alpha_start: 0.96     # first warm step: heavily favour transported
 alpha_end: 0.6        # last warm step: shift toward target
 
 # Boundary band
-boundary_band_width: 2   # known-side band width for boundary penalty
+boundary_band_width: 3   # known-side band width for boundary penalty
 
 # Transformer layers to hook during warm-start
 warm_layers:
@@ -36,7 +36,16 @@ warm_layers:
 
 # UniEdit-Flow editing phase
 omega: 4.0           # guidance correction strength
-alpha_edit: 0.8      # schedule truncation for edit phase (1.0 = full)
+alpha_edit: 0.4      # schedule truncation for edit phase (1.0 = full)
+
+# Observed-region reinjection
+observed_reinject: true   # anchor observed region to inversion trajectory every step
+# Widen the inpainted (unknown) region for reinjection only: dilates binary unknown
+# in image space by this many pixels before tokenisation, so soft-mask boundary
+# tokens keep the denoised latent (avoids a dark band from composite+VAE bleed).
+reinject_unknown_expand_px: 12
+# Optional extra dilation on the token grid after the above (0 = off).
+reinject_mask_dilate: 3
 
 # Debug
 debug: false

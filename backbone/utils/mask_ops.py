@@ -82,6 +82,82 @@ def mask_to_token_space(
     return m.to(device=device, dtype=dtype)
 
 
+def reinject_mask_token_expanded_unknown(
+    mask: Union[np.ndarray, torch.Tensor],
+    token_hw: Tuple[int, int],
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    expand_unknown_pixels: int = 0,
+) -> torch.Tensor:
+    """Token mask for reinjection with an optional widened unknown (hole) region.
+
+    When *expand_unknown_pixels* is 0, this matches :func:`mask_to_token_space`
+    (bilinear resize of the continuous mask).
+
+    When *expand_unknown_pixels* > 0, unknown is ``(mask > 0.5)`` in image
+    space, dilated by that many pixels, then downsampled to the token grid with
+    nearest-neighbour.  That widens the inpainted region for reinjection only,
+    so tokens in the soft-mask boundary band (often dark after VAE composite)
+    keep the denoised latent instead of being overwritten by inversion.
+    """
+    if expand_unknown_pixels <= 0:
+        return mask_to_token_space(mask, token_hw, batch_size, device, dtype)
+
+    if isinstance(mask, np.ndarray):
+        m = torch.from_numpy(mask).float()
+    else:
+        m = mask.float().detach()
+
+    if m.ndim == 2:
+        m = m.unsqueeze(0).unsqueeze(0)
+    elif m.ndim == 3:
+        if m.shape[0] == 1:
+            m = m.unsqueeze(0)
+        elif m.shape[-1] == 1:
+            m = m.permute(2, 0, 1).unsqueeze(0)
+        else:
+            raise ValueError(f"3-D mask must be [1,H,W] or [H,W,1], got {m.shape}")
+    elif m.ndim == 4:
+        if m.shape[0] != 1 or m.shape[1] != 1:
+            raise ValueError(f"4-D mask must be [1,1,H,W], got {m.shape}")
+    else:
+        raise ValueError(f"Unsupported mask ndim {m.ndim}")
+
+    m = m.clamp(0.0, 1.0)
+    unknown = (m > 0.5).float()
+    r = int(expand_unknown_pixels)
+    k = 2 * r + 1
+    expanded = F.max_pool2d(unknown, kernel_size=k, stride=1, padding=r)
+
+    th, tw = token_hw
+    expanded_tok = F.interpolate(expanded, size=(th, tw), mode="nearest")
+    out = expanded_tok.reshape(1, th * tw, 1).clamp(0.0, 1.0)
+    if batch_size > 1:
+        out = out.expand(batch_size, -1, -1)
+    return out.to(device=device, dtype=dtype)
+
+
+def dilate_token_mask(
+    mask_token: torch.Tensor,
+    token_hw: Tuple[int, int],
+    dilate_tokens: int,
+) -> torch.Tensor:
+    """Morphologically dilate the unknown (1) region on the token grid.
+
+    ``mask_token`` is ``[1, N, 1]`` with 1 = unknown.  Each *dilate_tokens*
+    step widens unknown by one token in the 4-neighbour sense via max-pool.
+    """
+    if dilate_tokens <= 0:
+        return mask_token
+    h, w = token_hw
+    m_2d = mask_token[:, :, 0].reshape(1, 1, h, w).float()
+    k = 2 * int(dilate_tokens) + 1
+    pad = int(dilate_tokens)
+    m_2d = F.max_pool2d(m_2d, kernel_size=k, stride=1, padding=pad)
+    return m_2d.reshape(1, h * w, 1).to(mask_token.dtype)
+
+
 def mask_2d_from_token_mask(
     mask_token: torch.Tensor,
     token_hw: Tuple[int, int],
