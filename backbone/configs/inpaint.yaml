@@ -47,5 +47,11 @@ reinject_unknown_expand_px: 12
 # Optional extra dilation on the token grid after the above (0 = off).
 reinject_mask_dilate: 3
 
+# VAE decode: per-channel affine (scale + shift) fit on observed pixels vs reference
+vae_observed_color_fix: true
+# vae_color_fix_min_pixels: 64
+# vae_color_fix_scale_lo: 0.5
+# vae_color_fix_scale_hi: 2.0
+
 # Debug
 debug: false

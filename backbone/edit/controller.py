@@ -79,6 +79,7 @@ class BCOTHVEPipeline:
         prompt_tgt: str,
         config: Dict[str, Any],
         output_dir: Optional[str] = None,
+        blackout_unknown: bool = True,
     ) -> Image.Image:
         """Execute the full four-phase BCOT-HVE pipeline.
 
@@ -95,6 +96,7 @@ class BCOTHVEPipeline:
         skip_alpha = (T - K) / T if K > 0 else alpha_edit
         debug = config.get("debug", False)
         observed_reinject = config.get("observed_reinject", False)
+        vae_observed_color_fix = bool(config.get("vae_observed_color_fix", True))
 
         warm_layers: List[Tuple[str, int]] = []
         for entry in config.get("warm_layers", [["double", 2], ["double", 4]]):
@@ -116,10 +118,11 @@ class BCOTHVEPipeline:
         else:
             mask_np = mask.cpu().numpy()
 
-        # Black out unknown region to prevent info leakage
-        mask_pil = Image.fromarray((mask_np.squeeze() * 255).astype(np.uint8), mode="L")
-        bg = Image.new("RGB", image.size, (0, 0, 0))
-        image = Image.composite(bg, image.convert("RGB"), mask_pil.resize(image.size))
+        # Black out unknown region to prevent info leakage if blackout_unknown is True
+        if blackout_unknown:
+            mask_pil = Image.fromarray((mask_np.squeeze() * 255).astype(np.uint8), mode="L")
+            bg = Image.new("RGB", image.size, (0, 0, 0))
+            image = Image.composite(bg, image.convert("RGB"), mask_pil.resize(image.size))
 
         # VAE encode
         image_latent, latent_ids = self.wrapper.image2latent(image)
@@ -257,6 +260,9 @@ class BCOTHVEPipeline:
                 skip_alpha=skip_alpha,
                 debug=debug,
                 output_dir=output_dir,
+                reference_image=image,
+                vae_observed_color_fix=vae_observed_color_fix,
+                color_fix_config=config,
             )
         else:
             result_image = self._edit_via_pipe(
@@ -272,6 +278,9 @@ class BCOTHVEPipeline:
                 prompt_tgt=prompt_tgt,
                 debug=debug,
                 output_dir=output_dir,
+                reference_image=image,
+                vae_observed_color_fix=vae_observed_color_fix,
+                color_fix_config=config,
             )
 
         # ------------------------------------------------------------------
@@ -280,7 +289,7 @@ class BCOTHVEPipeline:
         if output_dir is not None:
             result_image.save(os.path.join(output_dir, "result.png"))
 
-        if debug:
+        if debug and output_dir is not None:
             self._save_debug_outputs(image, result_image, mask_np, token_hw, output_dir)
 
         return result_image
@@ -288,6 +297,65 @@ class BCOTHVEPipeline:
     # ------------------------------------------------------------------
     # Phase C helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _vae_affine_color_fix_decoded(
+        decoded: torch.Tensor,
+        ref_tensor: torch.Tensor,
+        mask_unknown_hw: torch.Tensor,
+        min_pixels: int = 64,
+        scale_lo: float = 0.5,
+        scale_hi: float = 2.0,
+    ) -> torch.Tensor:
+        """Per-channel affine match ``decoded ≈ scale * decoded + shift`` to ``ref`` on observed pixels.
+
+        ``decoded`` and ``ref_tensor`` are ``[1, 3, H, W]`` in the same value range (e.g. ``[-1, 1]``).
+        ``mask_unknown_hw`` is ``[1, 1, H, W]`` with **1 = unknown**, **0 = observed**; the fit uses
+        **observed** pixels only.
+        """
+        if decoded.shape != ref_tensor.shape:
+            raise ValueError(f"decoded/ref shape mismatch: {tuple(decoded.shape)} vs {tuple(ref_tensor.shape)}")
+        H, W = decoded.shape[-2:]
+        if mask_unknown_hw.shape[-2:] != (H, W):
+            mask_unknown_hw = F.interpolate(
+                mask_unknown_hw.float(), size=(H, W), mode="bilinear", align_corners=False
+            )
+        known = (mask_unknown_hw < 0.5).float()  # [1,1,H,W]
+        out = decoded.clone()
+        for c in range(3):
+            d = decoded[0, c].reshape(-1)
+            r = ref_tensor[0, c].reshape(-1)
+            k = known.reshape(-1) > 0.5
+            n = int(k.sum().item())
+            if n < min_pixels:
+                continue
+            dv = d[k].float()
+            rv = r[k].float()
+            mean_d = dv.mean()
+            mean_r = rv.mean()
+            var_d = ((dv - mean_d) ** 2).mean().clamp(min=1e-8)
+            cov = ((dv - mean_d) * (rv - mean_r)).mean()
+            scale = (cov / var_d).clamp(scale_lo, scale_hi).to(decoded.dtype)
+            shift = (mean_r - scale * mean_d).to(decoded.dtype)
+            out[0, c] = (decoded[0, c] * scale + shift).clamp(-1.0, 1.0)
+        return out
+
+    def _vae_color_fix_prepare_reference_tensor(
+        self,
+        pipe,
+        reference_image: Image.Image,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        ref_t = pipe.image_processor.preprocess(
+            reference_image.convert("RGB"), height=height, width=width
+        )
+        ref_t = ref_t.to(device=device, dtype=dtype)
+        if ref_t.ndim == 3:
+            ref_t = ref_t.unsqueeze(0)
+        return ref_t
 
     @torch.no_grad()
     def _edit_via_pipe(
@@ -304,6 +372,9 @@ class BCOTHVEPipeline:
         prompt_tgt: str,
         debug: bool,
         output_dir: Optional[str] = None,
+        reference_image: Optional[Image.Image] = None,
+        vae_observed_color_fix: bool = True,
+        color_fix_config: Optional[Dict[str, Any]] = None,
     ) -> Image.Image:
         """Original Phase C: delegate to the pipeline black-box."""
         tok_h, tok_w = token_hw
@@ -330,7 +401,7 @@ class BCOTHVEPipeline:
         self.wrapper.edit_scheduler.set_external_guidance_mask(external_mask)
 
         pipe.scheduler = self.wrapper.edit_scheduler
-        return pipe(
+        result_pil = pipe(
             prompt=[prompt_src, prompt_tgt],
             num_inference_steps=T,
             guidance_scale=1.0,
@@ -339,6 +410,17 @@ class BCOTHVEPipeline:
             height=512,
             width=512,
         ).images[0]
+        if vae_observed_color_fix and reference_image is not None:
+            cfg = color_fix_config or {}
+            result_pil = self._vae_affine_color_fix_pil(
+                result_pil,
+                reference_image,
+                mask_np,
+                min_pixels=int(cfg.get("vae_color_fix_min_pixels", 64)),
+                scale_lo=float(cfg.get("vae_color_fix_scale_lo", 0.5)),
+                scale_hi=float(cfg.get("vae_color_fix_scale_hi", 2.0)),
+            )
+        return result_pil
 
     @torch.no_grad()
     def _edit_with_reinject(
@@ -357,7 +439,10 @@ class BCOTHVEPipeline:
         omega: float,
         skip_alpha: float,
         debug: bool,
-        output_dir: str,
+        output_dir: Optional[str],
+        reference_image: Optional[Image.Image] = None,
+        vae_observed_color_fix: bool = True,
+        color_fix_config: Optional[Dict[str, Any]] = None,
     ) -> Image.Image:
         """Phase C with observed-region reinjection from inversion trajectory.
 
@@ -476,9 +561,71 @@ class BCOTHVEPipeline:
 
         z_4d = pipe._unpatchify_latents(z_4d)
         decoded = pipe.vae.decode(z_4d, return_dict=False)[0]
+        if vae_observed_color_fix and reference_image is not None:
+            cfg = color_fix_config or {}
+            H, W = decoded.shape[-2], decoded.shape[-1]
+            m_t = torch.from_numpy(mask_np.astype(np.float32)).to(decoded.device)
+            if m_t.ndim == 2:
+                m_t = m_t.reshape(1, 1, *m_t.shape)
+            elif m_t.ndim == 3:
+                m_t = m_t.unsqueeze(0)
+            elif m_t.ndim == 4:
+                pass
+            else:
+                raise ValueError(f"mask_np must be 2D–4D after numpy conversion, got {m_t.shape}")
+            ref_t = self._vae_color_fix_prepare_reference_tensor(
+                pipe, reference_image, H, W, decoded.device, decoded.dtype,
+            )
+            decoded = self._vae_affine_color_fix_decoded(
+                decoded,
+                ref_t,
+                m_t,
+                min_pixels=int(cfg.get("vae_color_fix_min_pixels", 64)),
+                scale_lo=float(cfg.get("vae_color_fix_scale_lo", 0.5)),
+                scale_hi=float(cfg.get("vae_color_fix_scale_hi", 2.0)),
+            )
         result_image = pipe.image_processor.postprocess(decoded, output_type="pil")[0]
 
         return result_image
+
+    @staticmethod
+    def _vae_affine_color_fix_pil(
+        result: Image.Image,
+        reference: Image.Image,
+        mask_np: np.ndarray,
+        min_pixels: int = 64,
+        scale_lo: float = 0.5,
+        scale_hi: float = 2.0,
+    ) -> Image.Image:
+        """Same affine model as ``_vae_affine_color_fix_decoded`` but on linear RGB ``[0, 1]`` PIL images."""
+        res = np.array(result.convert("RGB"), dtype=np.float32) / 255.0
+        ref = np.array(reference.convert("RGB").resize(result.size), dtype=np.float32) / 255.0
+        m = mask_np.squeeze()
+        if m.shape != res.shape[:2]:
+            m = (
+                np.array(
+                    Image.fromarray((m * 255).astype(np.uint8), mode="L").resize(
+                        (res.shape[1], res.shape[0])
+                    ),
+                    dtype=np.float32,
+                )
+                / 255.0
+            )
+        known = m < 0.5
+        if int(known.sum()) < min_pixels:
+            return result
+        out = res.copy()
+        for c in range(3):
+            d = res[:, :, c][known].reshape(-1)
+            r = ref[:, :, c][known].reshape(-1)
+            mean_d = float(d.mean())
+            mean_r = float(r.mean())
+            var_d = float(np.mean((d - mean_d) ** 2)) + 1e-8
+            cov = float(np.mean((d - mean_d) * (r - mean_r)))
+            scale = float(np.clip(cov / var_d, scale_lo, scale_hi))
+            shift = mean_r - scale * mean_d
+            out[:, :, c] = np.clip(scale * res[:, :, c] + shift, 0.0, 1.0)
+        return Image.fromarray((out * 255.0).astype(np.uint8), mode="RGB")
 
     def compute_metrics(
         self,
