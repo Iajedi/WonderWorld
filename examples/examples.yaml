@@ -127,7 +127,8 @@
 - name: venice
   image_filepath: examples/images/venice.png
   style_prompt: DSLR 35mm landscape
-  content_prompt: The Grand Canal in Venice, boats, historical buildings, waterway 
+  # content_prompt: The Grand Canal in Venice, boats, historical buildings, waterway 
+  content_prompt: "A riverside view of the Grand Canal in Venice under a dramatic, cloudy sky. Along the river there are historic Venetian architecture buildings."
   negative_prompt: ""
   background: ""
 - name: village
@@ -148,5 +149,10 @@
   content_prompt: Link taking adventure in a world brimming with magic and wonder, majestic mountains, river, boy 
   negative_prompt: ""
   background: ""
-
+- name: snowman
+  image_filepath: examples/images/klein_snowman_scaled.png
+  style_prompt: DSLR 35mm landscape
+  content_prompt: Lake view with Italian houses, idyllic seaside scene with rustic Italian houses perched on the edge of a clear blue lake. trees and rocks near the lake, houses, port in front of houses
+  negative_prompt: ""
+  background: ""
 

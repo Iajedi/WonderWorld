@@ -33,7 +33,7 @@ class SyncDiffusion(nn.Module):
         elif self.sd_version == '1.5':
             model_key = "runwayml/stable-diffusion-v1-5"
         elif self.sd_version == '2.0-inpaint':
-            model_key = "stabilityai/stable-diffusion-2-inpainting"
+            model_key = "sd2-community/stable-diffusion-2-inpainting"
             self.condition = True
         else:
             raise ValueError(f'Stable-diffusion version {self.sd_version} not supported.')

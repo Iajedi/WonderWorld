@@ -1,0 +1,57 @@
+# BCOT-HVE inpainting configuration
+# Mask convention: 1 = unknown (hole), 0 = known (keep)
+
+# Diffusion schedule
+T: 50               # total denoising steps
+K: 10               # warm-start steps
+
+# Warm-start method: none | kv_replace | masked_attention | ot_only | ot_harmonic
+warm_method: ot_harmonic
+
+# Optimal transport
+lambda_pos: 0.1      # positional distance weight in cost matrix
+lambda_bdry: 1.0     # boundary-distance penalty weight
+tau: 0.05            # Sinkhorn entropy regularisation
+sinkhorn_iters: 100  # Sinkhorn iterations
+
+# Harmonic extension
+lambda_s: 0.5        # screening strength (data fidelity vs smoothness)
+connectivity: 8      # grid adjacency for Laplacian (4 or 8)
+
+# Alpha schedule (blending transported vs target velocity)
+alpha_start: 0.96     # first warm step: heavily favour transported
+alpha_end: 0.6        # last warm step: shift toward target
+
+# Boundary band
+boundary_band_width: 3   # known-side band width for boundary penalty
+
+# Transformer layers to hook during warm-start
+warm_layers:
+  - [double, 0]
+  - [double, 4]
+  - [single, 4]
+  - [single, 5]
+  - [single, 15]
+  - [single, 19]
+
+# UniEdit-Flow editing phase
+omega: 4.0           # guidance correction strength
+alpha_edit: 0.4      # schedule truncation for edit phase (1.0 = full)
+
+# Observed-region reinjection
+observed_reinject: true   # anchor observed region to inversion trajectory every step
+# Widen the inpainted (unknown) region for reinjection only: dilates binary unknown
+# in image space by this many pixels before tokenisation, so soft-mask boundary
+# tokens keep the denoised latent (avoids a dark band from composite+VAE bleed).
+reinject_unknown_expand_px: 12
+# Optional extra dilation on the token grid after the above (0 = off).
+reinject_mask_dilate: 3
+
+# VAE decode: per-channel affine (scale + shift) fit on observed pixels vs reference
+vae_observed_color_fix: true
+# vae_color_fix_min_pixels: 64
+# vae_color_fix_scale_lo: 0.5
+# vae_color_fix_scale_hi: 2.0
+
+# Debug
+debug: false

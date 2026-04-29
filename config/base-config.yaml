@@ -21,7 +21,7 @@ num_finetune_decoder_steps_interp: 30
 preservation_weight: 10
 
 #inpainting parameters
-stable_diffusion_checkpoint: "stabilityai/stable-diffusion-2-inpainting" #"dreambooth_models/mountains-sks-1500"
+stable_diffusion_checkpoint: "sd2-community/stable-diffusion-2-inpainting" #"dreambooth_models/mountains-sks-1500"
 inpainting_resolution_interp: 512
 inpainting_resolution_gen: 512
 
@@ -48,10 +48,13 @@ gen_sky: False
 gen_layer: False
 
 camera_speed_multiplier_rotation: 0.3
-api_key: "Your OpenAI api_key"
+api_key: ""
 gen_sky_image: False
 
 use_compile: False
 rotation_path: [2, 2, 2, 2, 2, 2, 2, 2, -2, -2, -2, -2, -2, -2, -2, -2]
 num_scenes: 16
 use_free_lunch: False
+
+#test: use flux
+use_flux: False

@@ -16,7 +16,7 @@ import torchvision
 
 import torch.nn.functional as F
 import skimage
-from PIL import Image
+from PIL import Image, ImageFilter
 from einops import rearrange
 from kornia.geometry import PinholeCamera
 from pytorch3d.renderer import (
@@ -340,7 +340,7 @@ class FrameSyn(torch.nn.Module):
         return depth, disparity
     
     @torch.no_grad()
-    def inpaint(self, rendered_image, inpaint_mask, fill_mask=None, fill_mode = 'cv2_telea', self_guidance=False, style=None, inpainting_prompt=None, negative_prompt=None, mask_strategy=np.min, diffusion_steps=50):
+    def inpaint(self, rendered_image, inpaint_mask, fill_mask=None, fill_mode = 'cv2_telea', self_guidance=False, style=None, inpainting_prompt=None, negative_prompt=None, mask_strategy=np.min, diffusion_steps=50, bcot_prompt_src=None, bcot_prompt_tgt=None):
         # set resolution
         if self.inpainting_resolution > 512 and rendered_image.shape[-1] == 512:
             padded_inpainting_mask = self.border_mask.clone()
@@ -380,20 +380,90 @@ class FrameSyn(torch.nn.Module):
             negative_prompt = self.adaptive_negative_prompt + self.negative_inpainting_prompt if self.adaptive_negative_prompt != None else self.negative_inpainting_prompt
       
         if self.use_flux:
-            max_res = max(self.inpainting_resolution, 576)
-            inpainted_image = self.inpainting_pipeline(
-                prompt="" if self.use_noprompt else self.inpainting_prompt,
-                image=init_image,
-                mask_image=mask_image,
-                height=max_res,
-                width=max_res,
-                guidance_scale=50,
-                num_inference_steps=diffusion_steps,
-                max_sequence_length=512,
-                generator=torch.Generator("cpu").manual_seed(0),
-            ).images[0]
+            # max_res = max(self.inpainting_resolution, 576)
+            # inpainted_image = self.inpainting_pipeline(
+            #     prompt="" if self.use_noprompt else self.inpainting_prompt,
+            #     image=init_image,
+            #     mask_image=mask_image,
+            #     height=max_res,
+            #     width=max_res,
+            #     guidance_scale=50,
+            #     num_inference_steps=diffusion_steps,
+            #     max_sequence_length=512,
+            #     generator=torch.Generator("cpu").manual_seed(0),
+            # ).images[0]
+            if hasattr(self.inpainting_pipeline, "run"):
+                if (
+                    not self.use_noprompt
+                    and bcot_prompt_src is not None
+                    and bcot_prompt_tgt is not None
+                ):
+                    prompt_src = bcot_prompt_src
+                    prompt_tgt = bcot_prompt_tgt
+                else:
+                    prompt_src = prompt_tgt = "" if self.use_noprompt else self.inpainting_prompt
+                bcot_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
+                # Slightly blur mask edges for smoother BCOT transitions.
+                bcot_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
+                    ImageFilter.GaussianBlur(radius=5.0)
+                )
+                bcot_mask_np = (np.array(bcot_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
+                is_content_inpainting = fill_mask is not None
+                bcot_config = {
+                    "T": int(diffusion_steps),
+                    "K": max(1, int(diffusion_steps) // 5),
+                    "warm_method": "none" if is_content_inpainting else "ot_harmonic",
+                    "omega": 4.0,
+                    "alpha_edit": 0.8,
+                    "debug": True,
+                    "vae_observed_color_fix": True,
+                    "reinject_unknown_expand_px": 4 if is_content_inpainting else 12,
+                    "reinject_mask_dilate": 1 if is_content_inpainting else 3,
+                    "observed_reinject": True,
+                    "lambda_pos": 0.1,
+                    "lambda_bdry": 1.0,
+                    "tau": 0.05,
+                    "sinkhorn_iters": 100,
+                    "lambda_s": 0.5,
+                    "connectivity": 8,
+                    "alpha_start": 0.96,
+                    "alpha_end": 0.6,
+                    "boundary_band_width": 3,
+                    "warm_layers": [
+                        ["double", 0],
+                        ["double", 4],
+                        ["single", 4],
+                        ["single", 5],
+                        ["single", 15],
+                        ["single", 19],
+                    ],
+                }
+                bcot_input_image.save("output/flux_debug/bcot_input_image.png")
+                bcot_mask_pil.save("output/flux_debug/bcot_mask_pil.png")
+                inpainted_image = self.inpainting_pipeline.run(
+                    image=bcot_input_image,
+                    mask=bcot_mask_np,
+                    prompt_src=prompt_src,
+                    prompt_tgt=prompt_tgt,
+                    config=bcot_config,
+                    output_dir="output/flux_debug",
+                    blackout_unknown=not is_content_inpainting,
+                )
+            else:
+                max_res = max(self.inpainting_resolution, 576)
+                inpainted_image = self.inpainting_pipeline(
+                    prompt="" if self.use_noprompt else self.inpainting_prompt,
+                    image=init_image,
+                    mask_image=mask_image,
+                    height=max_res,
+                    width=max_res,
+                    guidance_scale=50,
+                    num_inference_steps=diffusion_steps,
+                    max_sequence_length=512,
+                    generator=torch.Generator("cpu").manual_seed(0),
+                ).images[0]
             inpainted_image = inpainted_image.resize((self.inpainting_resolution, self.inpainting_resolution), Image.Resampling.LANCZOS)
-            inpainted_image = torchvision.transforms.ToTensor()(inpainted_image).cuda(device=0)
+            inpainted_image = torchvision.transforms.ToTensor()(inpainted_image).to(self.device)
         else:
             inpainted_image = self.inpainting_pipeline(
                 prompt='' if self.use_noprompt else self.inpainting_prompt,
@@ -1481,6 +1551,8 @@ class KeyframeGen(FrameSyn):
         self.mask_disocclusion = erosion(mask_disocclusion.float().to(self.device),
                                          kernel=dilation_kernel)
         inpaint_mask = self.mask_disocclusion > 0.5  # Erode a bit to prevent over-inpaint
+        
+        # Base layer inpainting
         self.inpaint(self.image_latest, inpaint_mask=inpaint_mask, inpainting_prompt=inpainting_prompt, negative_prompt='tree, plant', mask_strategy=np.max, diffusion_steps=50)
         inpainter_output = self.image_latest
         

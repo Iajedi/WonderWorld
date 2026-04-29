@@ -202,6 +202,7 @@ def readColmapSceneInfo(path, images, eval, preset=None, llffhold=8):
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
+    print(path)
 
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
@@ -222,6 +223,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             T = w2c[:3, 3]
 
             image_path = os.path.join(path, cam_name)
+            print(image_path)
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
             
@@ -241,7 +243,8 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             norm_data = im_data / 255.0
             arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            print(arr.shape)
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
 
             fovy = focal2fov(fov2focal(fovx, image.size[1]), image.size[0])
             FovY = fovy 
@@ -352,7 +355,7 @@ def loadCamerasFromData(traindata, white_background):
 
         norm_data = im_data / 255.0
         arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-        image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+        image = Image.fromarray(np.array(arr*255.0, dtype=np.uint8), "RGB")
         loaded_mask = np.ones_like(norm_data[:, :, 3:4])
 
         fovy = focal2fov(fov2focal(fovx, image.size[1]), image.size[0])

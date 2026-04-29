@@ -19,6 +19,8 @@ from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler
 
 # TEST FLUX
 from diffusers import FluxFillPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
+from diffusers import Flux2KleinPipeline
+from backbone.edit.controller import BCOTHVEPipeline
 
 from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
@@ -26,7 +28,8 @@ from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNor
 
 from models.models import KeyframeGen, save_point_cloud_as_ply
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
-from util.chatGPT4 import TextpromptGen
+# from util.chatGPT4 import TextpromptGen
+from util.gemini_prompt_gen import GeminiTextpromptGen as TextpromptGen, GeminiTextpromptGen
 from util.general_utils import apply_depth_colormap, save_video
 from util.utils import save_depth_map, prepare_scheduler, soft_stitching
 from util.utils import load_example_yaml, convert_pt3d_cam_to_3dgs_cam
@@ -131,18 +134,18 @@ def run(config):
         # pipe.enable_model_cpu_offload()
         # DFloat11Model.from_pretrained('DFloat11/FLUX.1-Fill-dev-DF11', device='cpu', bfloat16_model=pipe.transformer)
         # inpainter_pipeline = pipe
-        transformer = FluxTransformer2DModel.from_single_file(
-            "https://huggingface.co/YarvixPA/FLUX.1-Fill-dev-gguf/blob/main/flux1-fill-dev-Q4_0.gguf",
-            quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
-            torch_dtype=torch.bfloat16,
-        )
-        device = torch.device("cuda:1")
-        inpainter_pipeline = FluxFillPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-Fill-dev",
-            transformer=transformer,
-            torch_dtype=torch.bfloat16,
-        ).to(device)
-        print(inpainter_pipeline.hf_device_map)
+        # transformer = FluxTransformer2DModel.from_single_file(
+        #     "https://huggingface.co/YarvixPA/FLUX.1-Fill-dev-gguf/blob/main/flux1-fill-dev-Q4_0.gguf",
+        #     quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
+        #     torch_dtype=torch.bfloat16,
+        # )
+        # device = torch.device("cuda:1")
+        # inpainter_pipeline = FluxFillPipeline.from_pretrained(
+        #     "black-forest-labs/FLUX.1-Fill-dev",
+        #     transformer=transformer,
+        #     torch_dtype=torch.bfloat16,
+        # ).to(device)
+        inpainter_pipeline = BCOTHVEPipeline(offload=False, model="klein", device="cuda:1")
     else:
         # Use SD checkpoint
         inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
@@ -190,10 +193,16 @@ def run(config):
     pt_gen = TextpromptGen(kf_gen.run_dir, isinstance(control_text, list))
     
     content_list = content_prompt.split(',')
-    scene_name = content_list[0]
-    entities = content_list[1:]
+    if config["use_flux"]:
+        scene_name = content_prompt
+        entities = content_list[1:]
+    else:
+        scene_name = content_list[0]
+        entities = content_list[1:]
     scene_dict = {'scene_name': scene_name, 'entities': entities, 'style': style_prompt, 'background': background_prompt}
     inpainting_prompt = content_prompt
+    if isinstance(pt_gen, GeminiTextpromptGen):
+        pt_gen.set_initial_resolved_state(scene_dict, style=style_prompt)
     socketio.emit('scene-prompt', scene_name, room=client_id)
 
     kf_gen.increment_kf_idx()
@@ -316,8 +325,12 @@ def run(config):
         if config['use_gpt']:
             scene_dict = pt_gen.wonder_next_scene(scene_name=scene_name, entities=scene_dict['entities'], style=style_prompt, background=scene_dict['background'], change_scene_name_by_user=change_scene_name_by_user)
             change_scene_name_by_user = False
+
         inpainting_prompt = pt_gen.generate_prompt(style=style_prompt, entities=scene_dict['entities'], background=scene_dict['background'], scene_name=scene_dict['scene_name'])
         scene_name = scene_dict['scene_name'] if isinstance(scene_dict['scene_name'], str) else scene_dict['scene_name'][0]
+        bcot_src, bcot_tgt = (None, None)
+        if isinstance(pt_gen, GeminiTextpromptGen):
+            bcot_src, bcot_tgt = pt_gen.get_bcot_inpaint_pair_for_content()
         
         ###### ------------------ Keyframe (the major part of point clouds) generation ------------------ ######        
         kf_gen.set_kf_param(inpainting_resolution=config['inpainting_resolution_gen'],
@@ -389,7 +402,8 @@ def run(config):
             outpaint_mask = dilation(outpaint_mask, kernel=torch.ones(7, 7).cuda())
 
         
-        inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50)
+        # Content inpainting
+        inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50, bcot_prompt_src=bcot_src, bcot_prompt_tgt=bcot_tgt)
 
         sem_seg = kf_gen.update_sky_mask()
         recomposed = soft_stitching(render_pkg["render"], kf_gen.image_latest, kf_gen.sky_mask_latest)  # Replace generated sky with rendered sky

@@ -1,7 +1,8 @@
-runs_dir: output/real_campus_2
-example_name: real_campus_2
+runs_dir: output/flux_venice
+example_name: venice
+# city_hall, real_campus_2, venice
 
-seed: 1
+seed: 216
 # enable guided depth diffusion
 depth_conditioning: True
 
@@ -26,3 +27,6 @@ gen_sky: False
 gen_layer: True
 # load previously generated gaussians
 load_gen: False
+
+# USE FLUX
+use_flux: True

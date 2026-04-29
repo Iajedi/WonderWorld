@@ -1,0 +1,134 @@
+# EditPipeline (edit.geom_controller): inpaint → compose → seam refine
+# Mask files: 1 = unknown / region to change (same convention as inpaint.yaml)
+
+# inputs:
+#   # src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
+#   src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source.png
+#   # Target plate for composition (same file = self-composite / alignment smoke test)
+#   # tgt: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
+#   tgt: inputs/snowman.jpg
+
+# inputs:
+#   src: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/source.png
+#   tgt: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/target.png
+
+inputs:
+  src: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source.png
+  tgt: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target.png
+
+# geometry:
+#   edit_type: move
+#   mask_src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source_mask.png
+#   dx: 128
+#   dy: 0
+#   prompt_inpaint: >-
+#     Outdoor scene with soft, blurred background.
+#   prompt_refine: >-
+#     A small, textured orange teddy bear figurine wearing a blue knitted sweater adorned with colorful embroidered flowers. It features a pink bow and a white flower tucked by its ear, giving it a charming, handcrafted appearance.
+
+# geometry:
+#   edit_type: move
+#   mask_src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source_mask.png
+#   dx: 128
+#   dy: 0
+#   prompt_inpaint: >-
+#     Outdoor scene with soft, blurred background.
+#   prompt_refine: >-
+#     A small, textured orange teddy bear figurine wearing a blue knitted sweater adorned with colorful embroidered flowers. It features a pink bow and a white flower tucked by its ear, giving it a charming, handcrafted appearance.
+
+# geometry:
+#   edit_type: resize
+#   scale: 1.2
+#   mask_src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source_mask.png
+#   prompt_inpaint: >-
+#     Outdoor scene with soft, blurred background.
+#   prompt_refine: >-
+#     A small, textured orange teddy bear figurine wearing a blue knitted sweater adorned with colorful embroidered flowers. It features a pink bow and a white flower tucked by its ear, giving it a charming, handcrafted appearance.
+
+# geometry:
+#   edit_type: compose_multi
+#   prompt_inpaint: >-
+#     Indoor table scene with soft, blurred background, with a log platter, plant vase and cup.
+#   prompt_refine: >-
+#     A snowman with a yellow hat and scarf on a log platter, against a soft, blurred table background. The scarf has white ends
+#   removal_masks:
+#     - inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png
+
+#   compose:
+#     - paste_mask: inputs/snowman_mask.png
+#       dy: -40
+#       scale: 0.75
+
+# geometry:
+#   edit_type: compose_multi
+#   prompt_inpaint: >-
+#     Outdoor scene with blurred background of snow-capped mountains in golden hour.
+#   prompt_refine: >-
+#     A seagull with a red beak spreading its wings against a blurred background of snow-capped mountains in golden hour.
+#   removal_masks:
+#     - inputs/freefine/.freefine_checkout/Examples/Compose/pair1/source_mask.png
+#   compose:
+#     - paste_mask: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/target_mask.png
+
+geometry:
+  edit_type: compose_multi
+  prompt_inpaint: >-
+    Indoor scene with blurred background of dark interior tabletop.
+  prompt_refine: >-
+    A bishop and queen chess pieces on a dark interior tabletop against a dark, blurred background.
+  removal_masks:
+    - inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source_mask.png
+  compose:
+    - paste_mask: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target_mask.png
+      dx: 100
+      dy: -30
+# geometry:
+#   edit_type: resize
+#   mask_src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png
+#   scale: 0.5
+#   prompt_inpaint: >-
+#     Indoor table scene with soft, blurred background, with a log platter, plant vase and cup.
+#   prompt_refine: >-
+#     A yellow cake with white icing on a log platter, against a soft, blurred table background.
+
+# Second-stage seam band (build_boundary_blur_mask)
+seam_band_kernel: 5
+seam_blur_radius: 2.0
+# Asymmetric taper: smaller => steeper falloff *into* the mask; larger => gentler *outside*
+seam_sigma_inside: 1.0
+seam_sigma_outside: 12.0
+
+# --- BCOTHVE / UniEdit (same knobs as configs/inpaint.yaml) ---
+T: 50
+K: 10
+warm_method: ot_harmonic
+
+lambda_pos: 0.1
+lambda_bdry: 1.0
+tau: 0.05
+sinkhorn_iters: 100
+
+lambda_s: 0.5
+connectivity: 8
+
+alpha_start: 0.96
+alpha_end: 0.6
+
+boundary_band_width: 3
+
+warm_layers:
+  - [double, 0]
+  - [double, 4]
+  - [single, 4]
+  - [single, 5]
+  - [single, 15]
+  - [single, 19]
+
+omega: 4.0
+alpha_edit: 0.4
+
+observed_reinject: true
+reinject_unknown_expand_px: 12
+reinject_mask_dilate: 3
+
+debug: false

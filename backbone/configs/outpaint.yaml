@@ -1,0 +1,45 @@
+# BCOT-HVE outpainting configuration
+# Mask convention: 1 = unknown (extended region), 0 = known (original)
+
+# Diffusion schedule
+T: 50
+K: 10
+
+# Warm-start method
+warm_method: ot_harmonic
+
+# Optimal transport
+lambda_pos: 0.1
+lambda_bdry: 0.5     # lower boundary penalty for outpainting (boundary is at image edge)
+tau: 0.05
+sinkhorn_iters: 100
+
+# Harmonic extension
+lambda_s: 0.3        # lower screening for smoother outward extension
+connectivity: 4
+
+# Alpha schedule
+alpha_start: 0.9
+alpha_end: 0.3
+
+# Boundary band
+boundary_band_width: 3   # wider band for outpainting
+
+# Transformer layers to hook
+warm_layers:
+  - [double, 0]
+  - [double, 4]
+  - [single, 4]
+  - [single, 5]
+
+# UniEdit-Flow editing phase
+omega: 5.0
+alpha_edit: 0.8
+
+# Observed-region reinjection
+observed_reinject: true
+reinject_unknown_expand_px: 12
+reinject_mask_dilate: 0
+
+# Debug
+debug: true
