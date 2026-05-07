@@ -2,12 +2,12 @@ runs_dir: output/flux_venice
 example_name: venice
 # city_hall, real_campus_2, venice
 
-seed: 216
+seed: 42
 # enable guided depth diffusion
 depth_conditioning: True
 
 # use gpt to generate scene description
-use_gpt: False
+use_gpt: True
 debug: True
 
 # depth model and camera/depth parameters

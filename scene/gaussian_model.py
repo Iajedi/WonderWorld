@@ -387,6 +387,29 @@ class GaussianModel:
         
         delete_mask = torch.logical_and(in_screen, ~self.is_sky_filter)
         self.delete_mask_all = self.delete_mask_all | delete_mask
+
+    @torch.no_grad()
+    def delete_regions(self, tdgs_cam, mask):
+        # Assert mask dimensions (H, W) matches camera image dimensions
+        print(mask.shape)
+        # assert mask.shape[0] == tdgs_cam.image_height and mask.shape[1] == tdgs_cam.image_width, "Mask dimensions (H, W) must match camera image dimensions (H, W)"
+        xyz = self.get_xyz_all
+        R = torch.tensor(tdgs_cam.R, device=xyz.device, dtype=torch.float32)
+        T = torch.tensor(tdgs_cam.T, device=xyz.device, dtype=torch.float32)
+
+        xyz_cam = xyz @ R + T[None, :]
+        x, y, z = xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2]
+        z = torch.clamp(z, min=0.001)
+        
+        x = x / z * tdgs_cam.focal_x + tdgs_cam.image_width / 2.0
+        y = y / z * tdgs_cam.focal_y + tdgs_cam.image_height / 2.0
+
+        # Check if points are in the mask
+        in_mask = mask[x, y]
+        delete_mask = torch.logical_and(~self.is_sky_filter, in_mask)
+        self.delete_mask_all = self.delete_mask_all | delete_mask=
+
+        # This is then passed into a delete call
         
     @torch.no_grad()
     def set_inscreen_points_to_visible(self, tdgs_cam):

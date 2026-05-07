@@ -41,6 +41,10 @@ from scipy.ndimage import label
 
 BG_COLOR=(1, 0, 0)
 
+# BCOT: PIL mask blur in `FrameSyn.inpaint` and, when `use_flux`, extra dilation of the
+# new-Gaussian insertion region in `run.py` to match this soft edge.
+BCOT_MASK_GAUSSIAN_BLUR_RADIUS = 10.0
+
     
 class PointsRenderer(torch.nn.Module):
     def __init__(self, rasterizer, compositor) -> None:
@@ -363,7 +367,7 @@ class FrameSyn(torch.nn.Module):
         img, _ = functbl[fill_mode](img, fill_mask_)
 
         # process mask original
-        mask_block_size = 8
+        mask_block_size = 16 if self.use_flux else 8
         mask_boundary = mask.shape[0] // 2
         mask_upper = skimage.measure.block_reduce(mask[:mask_boundary, :], (mask_block_size, mask_block_size), mask_strategy)
         mask_upper = mask_upper.repeat(mask_block_size, axis=0).repeat(mask_block_size, axis=1)
@@ -405,7 +409,7 @@ class FrameSyn(torch.nn.Module):
                 bcot_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
                 # Slightly blur mask edges for smoother BCOT transitions.
                 bcot_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
-                    ImageFilter.GaussianBlur(radius=5.0)
+                    ImageFilter.GaussianBlur(radius=BCOT_MASK_GAUSSIAN_BLUR_RADIUS)
                 )
                 bcot_mask_np = (np.array(bcot_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
                 is_content_inpainting = fill_mask is not None
@@ -413,12 +417,12 @@ class FrameSyn(torch.nn.Module):
                     "T": int(diffusion_steps),
                     "K": max(1, int(diffusion_steps) // 5),
                     "warm_method": "none" if is_content_inpainting else "ot_harmonic",
-                    "omega": 4.0,
-                    "alpha_edit": 0.8,
-                    "debug": True,
+                    "omega": 7.0,
+                    "alpha_edit": 0.7,
+                    "debug": False,
                     "vae_observed_color_fix": True,
-                    "reinject_unknown_expand_px": 4 if is_content_inpainting else 12,
-                    "reinject_mask_dilate": 1 if is_content_inpainting else 3,
+                    "reinject_unknown_expand_px": 4 if is_content_inpainting else 8,
+                    "reinject_mask_dilate": 1 if is_content_inpainting else 0,
                     "observed_reinject": True,
                     "lambda_pos": 0.1,
                     "lambda_bdry": 1.0,

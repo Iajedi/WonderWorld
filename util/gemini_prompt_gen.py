@@ -13,6 +13,9 @@ can switch with one import change, for example:
 * Set ``GOOGLE_API_KEY`` or ``GEMINI_API_KEY`` to a Google AI Studio / Gemini API key.
 * For :meth:`generate_keywords` / :meth:`generate_prompt`, the same spacy model as
   ``chatGPT4`` is used: ``python -m spacy download en_core_web_sm``.
+* BCOT (FLUX) prompts: call :meth:`build_bcot_inpaint_pair_from_conditioning_image` once per inpaint
+  with the conditioning render tensor/PIL — **two** Gemini calls (vision ``prompt_src``, text ``prompt_tgt``).
+  Scene JSON still uses :meth:`wonder_next_scene` separately when ``use_gpt`` is enabled.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import io
 import json
 import time
 import os
+import numpy as np
 from pathlib import Path
 
 import spacy
@@ -117,10 +121,8 @@ class GeminiTextpromptGen:
                 "(or pass api_key=)."
             )
         genai.configure(api_key=key)
-        # Previous resolved scene (after each successful wonder_next_scene); for BCOT src/tgt when user sets next scene
+        # Previous resolved scene (after each successful wonder_next_scene)
         self._last_resolved: dict | None = None
-        self._bcot_upcoming_src: str | None = None
-        self._bcot_content_pair: tuple[str, str] | None = None
 
     def get_destination_output(self):
         return self.destination_output
@@ -189,8 +191,7 @@ class GeminiTextpromptGen:
         return (r.text or "").strip().strip(".")
 
     def set_initial_resolved_state(self, scene_dict, style: str | None = None) -> None:
-        """Call once with the initial ``scene_dict`` from the example YAML so the first user-specified
-        "next scene" can build ``prompt_src`` from the pre-transition state."""
+        """Call once with the initial ``scene_dict`` from the example YAML (tracks prior scene for continuity)."""
         if scene_dict is None:
             return
         sn = scene_dict["scene_name"]
@@ -219,81 +220,145 @@ class GeminiTextpromptGen:
             else [output["background"]],
         }
 
-    def _prompt_for_resolved(self, style: str, d: dict) -> str:
-        sn = d.get("scene_name")
-        if isinstance(sn, (list, tuple)) and sn:
-            sn = sn[0]
-        ent = d.get("entities")
-        if ent is None:
-            ent = []
-        elif isinstance(ent, str):
-            ent = [ent]
-        else:
-            ent = list(ent)
-        bg = d.get("background")
-        if bg is not None:
-            b0 = bg[0] if isinstance(bg, (list, tuple)) and len(bg) else bg
-            if b0 is not None and str(b0).strip() != "":
-                return self.generate_prompt(style, ent, background=bg, scene_name=sn)
-        if sn is not None:
-            return self.generate_prompt(style, ent, background=None, scene_name=sn)
-        return self.generate_prompt(style, ent, background=bg, scene_name=sn)
+    def _scene_dict_for_bcot(self, scene_dict: dict) -> dict:
+        """Normalize scene_dict for BCOT target elaboration (same keys as wonder_next_scene JSON)."""
+        return _normalize_scene_dict(dict(scene_dict))
 
-    def get_bcot_inpaint_pair_for_content(self) -> tuple[str | None, str | None]:
-        """If the last :meth:`wonder_next_scene` was a user-specified next scene, return
-        (prompt_src, prompt_tgt) for BCOT content inpainting; otherwise (None, None). One-shot.
-        """
-        p = self._bcot_content_pair
-        self._bcot_content_pair = None
-        if p is None:
-            return None, None
-        return p[0], p[1]
-
-    def _synthesize_bcot_target(self, style: str, prompt_src: str, new_output: dict) -> str:
-        """Build one coherent tgt: observed regions (src) + new next-scene content."""
-        d = _normalize_scene_dict(new_output) if "scene_name" in new_output else new_output
+    def _scene_user_spec_block(self, style: str, d: dict) -> str:
+        """Human-readable block for the target-scene / user-intent side of BCOT."""
+        d = self._scene_dict_for_bcot(d)
         name = d["scene_name"]
         name0 = name[0] if isinstance(name, (list, tuple)) else str(name)
         ent = d["entities"]
-        bg0 = d["background"][0] if isinstance(d["background"], (list, tuple)) else d["background"]
-        g = _require_genai()
-        system = (
-            "You write a single text-to-image prompt (English) for inpainting. The first block describes the "
-            "pre-existing, observed parts of the frame (source). The new scene name, entities, and background are what "
-            "the user is transitioning to in the new regions. Combine them into one fluent prompt that: (1) does not add "
-            "invented details that contradict the source description, (2) naturally extends the world with the new content, "
-            "(3) is one paragraph, no JSON. Output only the final prompt, no preface."
-        )
-        user = (
-            f"Image style: {style}\n\n"
-            f"--- prompt_src (describe only what is already in the pre-inpaint / observed regions) ---\n{prompt_src}\n\n"
-            f"--- next scene to integrate into newly revealed (inpainted) areas ---\n"
-            f"Scene name: {name0}\n"
+        bg = d["background"]
+        bg0 = bg[0] if isinstance(bg, (list, tuple)) and bg else bg
+        return (
+            f"Image style: {style}\n"
+            f"Target scene name: {name0}\n"
             f"Entities: {ent!s}\n"
             f"Background: {bg0}\n"
         )
-        m = g.GenerativeModel(self.model, system_instruction=system)
+
+    def _conditioning_image_to_pil(self, image):
+        """Accept PIL Image or CHW float tensor [0,1] (optional batch dim)."""
+        from PIL import Image as PILImage
+
+        if isinstance(image, PILImage.Image):
+            return image.convert("RGB")
+        try:
+            import torch
+
+            if isinstance(image, torch.Tensor):
+                x = image.detach().float().cpu()
+                if x.dim() == 4:
+                    x = x[0]
+                x = x.clamp(0, 1).numpy()
+                arr = (np.transpose(x, (1, 2, 0)) * 255).astype(np.uint8)
+                return PILImage.fromarray(arr)
+        except ImportError:
+            pass
+        if isinstance(image, np.ndarray):
+            if image.dtype != np.uint8:
+                image = np.clip(image, 0, 1)
+                if image.max() <= 1.0:
+                    image = (image * 255).astype(np.uint8)
+                else:
+                    image = image.astype(np.uint8)
+            if image.ndim == 2:
+                raise ValueError("Expected HWC RGB array for BCOT conditioning image")
+            return PILImage.fromarray(image).convert("RGB")
+        raise TypeError(f"Unsupported conditioning image type: {type(image)}")
+
+    def build_bcot_inpaint_pair_from_conditioning_image(
+        self,
+        conditioning_image,
+        style: str,
+        scene_dict: dict,
+    ) -> tuple[str, str]:
+        """BCOT prompts for one inpaint step: exactly **two** Gemini calls.
+
+        1. **Vision** — ``prompt_src``: describe foreground and background as visible in the conditioning render.
+        2. **Text** — ``prompt_tgt``: one fluent prompt merging that observation with an elaboration of the target
+           scene (``scene_dict``: scene name, entities, background) and ``style``.
+
+        On failure, falls back to a heuristic ``prompt_src`` and :meth:`generate_prompt`-style ``prompt_tgt``.
+        """
+        _require_genai()
+        pil = self._conditioning_image_to_pil(conditioning_image)
+        d = self._scene_dict_for_bcot(scene_dict)
+        user_spec = self._scene_user_spec_block(style, d)
+
+        # --- Call 1 (vision): prompt_src ---
+        system_src = (
+            "You describe images for inpainting conditioning. Clearly separate **foreground** (main subjects, "
+            "nearby objects, terrain, structures in front) and **background** (sky, horizon, distant scenery). "
+            "Only state what is visibly present; do not invent occluded content. "
+            "Reply with plain prose only, 2 - 5 short sentences, no JSON or bullet labels."
+        )
+        g = _require_genai()
+        model_src = g.GenerativeModel(self.model, system_instruction=system_src)
+        prompt_src = ""
         for _ in range(3):
             try:
-                r = m.generate_content(user)
-                text = (r.text or "").strip()
-                if text:
-                    print("PROMPT TEXT (BCOT tgt, synthesized): ", text)
-                    return text
+                r = model_src.generate_content(
+                    [
+                        "Describe the foreground and the background of this image as they would appear to someone "
+                        "editing or inpainting this frame.",
+                        pil,
+                    ]
+                )
+                prompt_src = (r.text or "").strip()
+                if prompt_src:
+                    print("PROMPT TEXT (BCOT prompt_src, vision): ", prompt_src)
+                    break
             except Exception as e:  # noqa: BLE001
-                print(f"Gemini BCOT tgt synthesis retry: {e}")
+                print(f"Gemini BCOT prompt_src (vision) retry: {e}")
                 time.sleep(0.5)
-        return self._prompt_for_resolved(style, d)
+        if not prompt_src:
+            prompt_src = (
+                "Foreground and background as in the conditioning render: preserve visible geometry, objects, "
+                "and sky regions that are already drawn."
+            )
+
+        # --- Call 2 (text): prompt_tgt ---
+        system_tgt = (
+            "You write one English text-to-image prompt for boundary-conditioned inpainting. "
+            "You are given (A) an accurate description of what is already visible in the frame and (B) a target "
+            "scene specification (style, scene name, entities, background). "
+            "Produce a single fluent paragraph that: keeps (A) as the anchor for observed regions; elaborates (B) "
+            "so newly generated / inpainted areas match the intended scene; does not contradict (A). "
+            "Output only the final prompt, no title or preamble."
+        )
+        user_tgt = (
+            f"{user_spec}\n"
+            f"--- What is already visible in the frame (do not contradict this) ---\n{prompt_src}\n"
+        )
+        model_tgt = g.GenerativeModel(self.model, system_instruction=system_tgt)
+        prompt_tgt = ""
+        for _ in range(3):
+            try:
+                r = model_tgt.generate_content(user_tgt)
+                prompt_tgt = (r.text or "").strip()
+                if prompt_tgt:
+                    print("PROMPT TEXT (BCOT prompt_tgt, text): ", prompt_tgt)
+                    break
+            except Exception as e:  # noqa: BLE001
+                print(f"Gemini BCOT prompt_tgt retry: {e}")
+                time.sleep(0.5)
+        if not prompt_tgt:
+            sn = d["scene_name"]
+            sn0 = sn[0] if isinstance(sn, (list, tuple)) else str(sn)
+            ent = d["entities"]
+            if isinstance(ent, str):
+                ent = [ent]
+            bg = d["background"]
+            prompt_tgt = self.generate_prompt(style, list(ent), background=bg, scene_name=sn0)
+
+        return prompt_src, prompt_tgt
 
     def wonder_next_scene(
         self, style=None, entities=None, scene_name=None, background=None, change_scene_name_by_user=False
     ):
-        self._bcot_upcoming_src = None
-        if change_scene_name_by_user and self._last_resolved is not None and style is not None:
-            try:
-                self._bcot_upcoming_src = self._prompt_for_resolved(style, self._last_resolved)
-            except Exception as e:  # noqa: BLE001
-                print("Gemini BCOT prompt_src build failed:", e)
         if change_scene_name_by_user:
             self.scene_num += 1
             self.id += 1
@@ -377,15 +442,6 @@ class GeminiTextpromptGen:
                 time.sleep(1)
                 continue
 
-        if self._bcot_upcoming_src is not None and output is not None:
-            st = style or getattr(self, "_style_for_initial", None) or "photograph"
-            try:
-                tgt = self._synthesize_bcot_target(st, self._bcot_upcoming_src, output)
-            except Exception as e:  # noqa: BLE001
-                print("Gemini BCOT tgt synthesis failed, using generate_prompt fallback:", e)
-                tgt = self._prompt_for_resolved(st, self._resolved_dict_for_snapshot(output))
-            self._bcot_content_pair = (self._bcot_upcoming_src, tgt)
-        self._bcot_upcoming_src = None
         if output is not None:
             self._last_resolved = self._resolved_dict_for_snapshot(output)
 

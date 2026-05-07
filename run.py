@@ -26,7 +26,7 @@ from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
 from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNormal, MarigoldNormalsPipeline
 
-from models.models import KeyframeGen, save_point_cloud_as_ply
+from models.models import KeyframeGen, save_point_cloud_as_ply, BCOT_MASK_GAUSSIAN_BLUR_RADIUS
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
 # from util.chatGPT4 import TextpromptGen
 from util.gemini_prompt_gen import GeminiTextpromptGen as TextpromptGen, GeminiTextpromptGen
@@ -328,11 +328,10 @@ def run(config):
 
         inpainting_prompt = pt_gen.generate_prompt(style=style_prompt, entities=scene_dict['entities'], background=scene_dict['background'], scene_name=scene_dict['scene_name'])
         scene_name = scene_dict['scene_name'] if isinstance(scene_dict['scene_name'], str) else scene_dict['scene_name'][0]
-        bcot_src, bcot_tgt = (None, None)
-        if isinstance(pt_gen, GeminiTextpromptGen):
-            bcot_src, bcot_tgt = pt_gen.get_bcot_inpaint_pair_for_content()
-        
+
         ###### ------------------ Keyframe (the major part of point clouds) generation ------------------ ######        
+        
+        # Keyframe generation
         kf_gen.set_kf_param(inpainting_resolution=config['inpainting_resolution_gen'],
                             inpainting_prompt=inpainting_prompt, adaptive_negative_prompt=adaptive_negative_prompt)
         current_pt3d_cam = kf_gen.get_camera_by_js_view_matrix(view_matrix, xyz_scale=xyz_scale)
@@ -401,9 +400,28 @@ def run(config):
             outpaint_mask = inpaint_mask_0p0_nosky * mask_using_nosky_render + inpaint_mask_0p0 * mask_using_full_render
             outpaint_mask = dilation(outpaint_mask, kernel=torch.ones(7, 7).cuda())
 
+        # Widen the region for adding Gaussians under FLUX/BCOT: matches BCOT mask blur edge (PIL) in
+        # models.models.BCOT_MASK_GAUSSIAN_BLUR_RADIUS and KeyframeGen.inpaint.
+        if config["use_flux"]:
+            k = 5 * int(np.ceil(BCOT_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
+            k = min(k, 31)
+            outpaint_mask_for_new_points = (dilation(
+                outpaint_mask.float(), kernel=torch.ones(k, k, device=config["device"])
+            ) > 0.5).to(outpaint_mask.dtype)
+        else:
+            outpaint_mask_for_new_points = outpaint_mask
         
+        bcot_src, bcot_tgt = None, None
+        if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"]:
+            bcot_src, bcot_tgt = pt_gen.build_bcot_inpaint_pair_from_conditioning_image(
+                outpaint_condition_image, style_prompt, scene_dict
+            )
+
         # Content inpainting
         inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50, bcot_prompt_src=bcot_src, bcot_prompt_tgt=bcot_tgt)
+
+        # TODO: Prune edited regions (mask union of all edited regions)
+        # TODO: Edit output (equivalent to inpainting entire image)
 
         sem_seg = kf_gen.update_sky_mask()
         recomposed = soft_stitching(render_pkg["render"], kf_gen.image_latest, kf_gen.sky_mask_latest)  # Replace generated sky with rendered sky
@@ -441,11 +459,11 @@ def run(config):
             kf_gen.depth_latest[wrong_depth_mask] = kf_gen.depth_latest_init[wrong_depth_mask] + 0.0001
             kf_gen.depth_latest = kf_gen.mask_disocclusion * kf_gen.depth_latest + (1-kf_gen.mask_disocclusion) * kf_gen.depth_latest_init
             kf_gen.update_sky_mask()
-            valid_px_mask = outpaint_mask * (~kf_gen.sky_mask_latest)
+            valid_px_mask = outpaint_mask_for_new_points * (~kf_gen.sky_mask_latest)
             kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)  # Base only
-            kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest_init, depth=kf_gen.depth_latest_init, valid_mask=kf_gen.mask_disocclusion*outpaint_mask, gen_layer=True)  # Object layer
+            kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest_init, depth=kf_gen.depth_latest_init, valid_mask=kf_gen.mask_disocclusion*outpaint_mask_for_new_points, gen_layer=True)  # Object layer
         else:
-            valid_px_mask = outpaint_mask * (~kf_gen.sky_mask_latest)
+            valid_px_mask = outpaint_mask_for_new_points * (~kf_gen.sky_mask_latest)
             kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)
         kf_gen.archive_latest()
 
