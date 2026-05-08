@@ -34,6 +34,8 @@ class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
         self.debug_mask_dir = "outputs/masks"
         self.mask_token_shape = None
         self.external_guidance_mask = None
+        self.late_external_guidance_mask = None
+        self.late_external_guidance_steps = 0
 
     def set_hyperparameters(self, omega=5, alpha=1):
         self.omega = omega
@@ -59,6 +61,42 @@ class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
 
     def set_external_guidance_mask(self, mask: Optional[torch.Tensor]):
         self.external_guidance_mask = mask
+
+    def set_late_external_guidance_mask(
+        self,
+        mask: Optional[torch.Tensor],
+        final_steps: int = 0,
+    ):
+        self.late_external_guidance_mask = mask
+        self.late_external_guidance_steps = max(0, int(final_steps))
+
+    def _prepare_external_mask(self, mask: torch.Tensor, guidance: torch.Tensor) -> torch.Tensor:
+        mask = mask.to(device=guidance.device, dtype=guidance.dtype)
+        if mask.shape[0] == 1 and guidance.shape[0] > 1:
+            mask = mask.expand(guidance.shape[0], -1, -1)
+        if mask.shape != (guidance.shape[0], guidance.shape[1], 1):
+            raise ValueError(
+                "External guidance mask must have shape "
+                f"(B, N, 1) matching guidance tokens, got {tuple(mask.shape)} "
+                f"expected {(guidance.shape[0], guidance.shape[1], 1)}"
+            )
+        return mask.clamp(0, 1)
+
+    def _get_external_guidance_mask(self, guidance: torch.Tensor):
+        if self.external_guidance_mask is None:
+            return None
+
+        mask = self.external_guidance_mask
+        active_steps = len(self.timesteps) if self.timesteps is not None else 0
+        late_steps = min(self.late_external_guidance_steps, active_steps)
+        if (
+            self.late_external_guidance_mask is not None
+            and late_steps > 0
+            and self.step_index is not None
+            and self.step_index >= active_steps - late_steps
+        ):
+            mask = self.late_external_guidance_mask
+        return self._prepare_external_mask(mask, guidance)
 
     def _normalize_mask(self, mask: torch.Tensor):
         batch_size = mask.shape[0]
@@ -122,17 +160,9 @@ class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
         )
 
     def _get_effective_mask(self, guidance: torch.Tensor):
-        if self.external_guidance_mask is not None:
-            mask = self.external_guidance_mask.to(device=guidance.device, dtype=guidance.dtype)
-            if mask.shape[0] == 1 and guidance.shape[0] > 1:
-                mask = mask.expand(guidance.shape[0], -1, -1)
-            if mask.shape != (guidance.shape[0], guidance.shape[1], 1):
-                raise ValueError(
-                    "External guidance mask must have shape "
-                    f"(B, N, 1) matching guidance tokens, got {tuple(mask.shape)} "
-                    f"expected {(guidance.shape[0], guidance.shape[1], 1)}"
-                )
-            return mask.clamp(0, 1)
+        mask = self._get_external_guidance_mask(guidance)
+        if mask is not None:
+            return mask
 
         if len(guidance.shape) == 4:
             mask = guidance.mean(dim=1, keepdim=True)
@@ -235,12 +265,13 @@ class UniEditEulerScheduler(FlowMatchEulerDiscreteScheduler):
         v_src, v_trg = model_output.chunk(2, dim=0)
         guidance = v_trg - v_src
         mask = self._get_effective_mask(guidance)
+        external_mask = self._get_external_guidance_mask(guidance)
         self._print_mask_stats(mask, step_idx, timestep, sigma, sigma_next)
         self._save_mask_visualizations(mask, step_idx)
         
         # correction
-        if self.external_guidance_mask is not None:
-            stride_corr = self.omega * (sigma_next - sigma) * self.external_guidance_mask * guidance
+        if external_mask is not None:
+            stride_corr = self.omega * (sigma_next - sigma) * external_mask * guidance
         else:
             stride_corr = self.omega * (sigma_next - sigma) * (1 + mask) * guidance
         

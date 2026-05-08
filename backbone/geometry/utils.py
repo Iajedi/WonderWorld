@@ -7,7 +7,10 @@ import numpy as np
 import torch
 from PIL import Image, ImageChops, ImageFilter
 
-from geometry.spec import EditType, GeometrySpec
+try:
+    from .spec import EditType, GeometrySpec
+except ImportError:
+    from backbone.geometry.spec import EditType, GeometrySpec
 
 try:
     from scipy.ndimage import distance_transform_edt as _scipy_edt

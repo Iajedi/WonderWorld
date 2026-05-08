@@ -390,9 +390,24 @@ class GaussianModel:
 
     @torch.no_grad()
     def delete_regions(self, tdgs_cam, mask):
-        # Assert mask dimensions (H, W) matches camera image dimensions
-        print(mask.shape)
-        # assert mask.shape[0] == tdgs_cam.image_height and mask.shape[1] == tdgs_cam.image_width, "Mask dimensions (H, W) must match camera image dimensions (H, W)"
+        if not torch.is_tensor(mask):
+            mask = torch.as_tensor(mask)
+        mask = mask.detach().to(device=self.get_xyz_all.device)
+        while mask.ndim > 2:
+            mask = mask.squeeze(0)
+        if mask.ndim != 2:
+            raise ValueError(f"delete_regions mask must reduce to [H, W], got {tuple(mask.shape)}")
+
+        image_height = int(tdgs_cam.image_height)
+        image_width = int(tdgs_cam.image_width)
+        if tuple(mask.shape) != (image_height, image_width):
+            mask = F.interpolate(
+                mask.float().unsqueeze(0).unsqueeze(0),
+                size=(image_height, image_width),
+                mode="nearest",
+            ).squeeze(0).squeeze(0)
+        mask = mask > 0.5
+
         xyz = self.get_xyz_all
         R = torch.tensor(tdgs_cam.R, device=xyz.device, dtype=torch.float32)
         T = torch.tensor(tdgs_cam.T, device=xyz.device, dtype=torch.float32)
@@ -404,10 +419,16 @@ class GaussianModel:
         x = x / z * tdgs_cam.focal_x + tdgs_cam.image_width / 2.0
         y = y / z * tdgs_cam.focal_y + tdgs_cam.image_height / 2.0
 
-        # Check if points are in the mask
-        in_mask = mask[x, y]
-        delete_mask = torch.logical_and(~self.is_sky_filter, in_mask)
-        self.delete_mask_all = self.delete_mask_all | delete_mask=
+        in_screen_x = torch.logical_and(x >= 0, x < image_width)
+        in_screen_y = torch.logical_and(y >= 0, y < image_height)
+        in_screen = torch.logical_and(in_screen_x, in_screen_y)
+
+        x_idx = x.long().clamp(0, image_width - 1)
+        y_idx = y.long().clamp(0, image_height - 1)
+        in_mask = torch.zeros_like(in_screen, dtype=torch.bool)
+        in_mask[in_screen] = mask[y_idx[in_screen], x_idx[in_screen]]
+        delete_mask = torch.logical_and(torch.logical_and(in_screen, ~self.is_sky_filter), in_mask)
+        self.delete_mask_all = self.delete_mask_all | delete_mask
 
         # This is then passed into a delete call
         

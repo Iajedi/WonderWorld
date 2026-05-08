@@ -1477,7 +1477,7 @@ class KeyframeGen(FrameSyn):
         return mask
         
     @torch.no_grad()
-    def generate_layer(self, pred_semantic_map=None, scene_name=None):
+    def generate_layer(self, pred_semantic_map=None, scene_name=None, force_mask_disocclusion=None):
         self.image_latest_init = copy.deepcopy(self.image_latest)
         self.depth_latest_init = copy.deepcopy(self.depth_latest)
         self.disparity_latest_init = copy.deepcopy(self.disparity_latest)
@@ -1546,7 +1546,22 @@ class KeyframeGen(FrameSyn):
 
         inpainting_prompt = scene_name if scene_name is not None else 'road, building'
         print("Base layer inpainting_prompt: ", inpainting_prompt)
-        mask_disocclusion = torch.from_numpy(mask_disocclusion)[None, None]
+        if force_mask_disocclusion is None:
+            mask_disocclusion = torch.from_numpy(mask_disocclusion)[None, None]
+        else:
+            mask_disocclusion = force_mask_disocclusion.detach().bool().cpu()
+            while mask_disocclusion.ndim > 4:
+                mask_disocclusion = mask_disocclusion.squeeze(0)
+            if mask_disocclusion.ndim == 2:
+                mask_disocclusion = mask_disocclusion[None, None]
+            elif mask_disocclusion.ndim == 3:
+                mask_disocclusion = mask_disocclusion.unsqueeze(0)
+            if mask_disocclusion.shape != (1, 1, 512, 512):
+                mask_disocclusion = F.interpolate(
+                    mask_disocclusion.float(),
+                    size=(512, 512),
+                    mode="nearest",
+                ).bool()
         
         """Outside of this function, mask_disocclusion will be used to update point cloud and compute depth; 
         # For depth, we want the mask to be accurate, because we want to align correctly;

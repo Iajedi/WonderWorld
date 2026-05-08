@@ -356,6 +356,57 @@ class GeminiTextpromptGen:
 
         return prompt_src, prompt_tgt
 
+    def describe_edit_source_without_mask(self, masked_source_image) -> str:
+        """Describe the visible scene after the selected edit region has been blanked."""
+
+        system = (
+            "You describe images for object-removal inpainting. The image may contain a black blanked area where "
+            "an object or region was removed. Describe only the visible content outside that blanked area, including "
+            "scene layout, materials, lighting, background, and nearby context. Do not describe or guess the removed "
+            "object. Output one detailed paragraph, no title or bullets."
+        )
+        prompt = (
+            "Describe the image content outside the blanked/removed region. Exclude the missing region and do not "
+            "invent what was there."
+        )
+        fallback = (
+            "A detailed scene with the visible regions preserved around a blanked edit area; describe the background, "
+            "surfaces, lighting, and surrounding objects while excluding the removed region."
+        )
+        return self._describe_image_for_edit(masked_source_image, system, prompt, fallback)
+
+    def describe_composed_edit_image(self, composed_image) -> str:
+        """Describe the composed image after the first geometry/FLUX pass."""
+
+        system = (
+            "You describe edited images for a follow-up refinement model. Describe the full composed scene exactly "
+            "as visible, including the inserted or transformed foreground, surrounding context, lighting, materials, "
+            "and how the edit fits into the scene. Output one detailed paragraph, no title or bullets."
+        )
+        prompt = "Describe this composed/edited image in detail for image refinement."
+        fallback = (
+            "A detailed composed scene containing the edited foreground and surrounding background, with coherent "
+            "lighting, placement, materials, and scene context."
+        )
+        return self._describe_image_for_edit(composed_image, system, prompt, fallback)
+
+    def _describe_image_for_edit(self, image, system: str, prompt: str, fallback: str) -> str:
+        _require_genai()
+        pil = self._conditioning_image_to_pil(image).resize((512, 512))
+        g = _require_genai()
+        model = g.GenerativeModel(self.model, system_instruction=system)
+        for _ in range(3):
+            try:
+                r = model.generate_content([prompt, pil])
+                text = (r.text or "").strip()
+                if text:
+                    print("PROMPT TEXT (edit image description): ", text)
+                    return text
+            except Exception as e:  # noqa: BLE001
+                print(f"Gemini edit image description retry: {e}")
+                time.sleep(0.5)
+        return fallback
+
     def wonder_next_scene(
         self, style=None, entities=None, scene_name=None, background=None, change_scene_name_by_user=False
     ):

@@ -102,6 +102,8 @@ class BCOTHVEPipeline:
         config: Dict[str, Any],
         output_dir: Optional[str] = None,
         blackout_unknown: bool = True,
+        late_edit_mask: Optional[Union[str, np.ndarray, torch.Tensor]] = None,
+        late_edit_steps: int = 0,
     ) -> Image.Image:
         """Execute the full four-phase BCOT-HVE pipeline.
 
@@ -131,14 +133,10 @@ class BCOTHVEPipeline:
         # ------------------------------------------------------------------
         if isinstance(image, str):
             image = Image.open(image).convert("RGB")
-        if isinstance(mask, str):
-            mask_img = Image.open(mask).convert("L")
-            mask_np = np.array(mask_img.resize((512, 512))) / 255.0
-            mask_np = mask_np.astype(np.float32).reshape(1, 1, 512, 512)
-        elif isinstance(mask, np.ndarray):
-            mask_np = mask
-        else:
-            mask_np = mask.cpu().numpy()
+        mask_np = self._coerce_mask_np(mask)
+        late_mask_np = None
+        if late_edit_mask is not None and int(late_edit_steps) > 0:
+            late_mask_np = self._coerce_mask_np(late_edit_mask)
 
         # Black out unknown region to prevent info leakage if blackout_unknown is True
         if blackout_unknown:
@@ -194,17 +192,23 @@ class BCOTHVEPipeline:
 
         reinject_expand_px = int(config.get("reinject_unknown_expand_px", 0))
         reinject_mask_dilate = int(config.get("reinject_mask_dilate", 0))
-        mask_token_reinject = reinject_mask_token_expanded_unknown(
-            mask_np,
-            token_hw,
-            batch_size=1,
+        mask_token_reinject = self._build_reinject_mask_token(
+            mask_np=mask_np,
+            token_hw=token_hw,
             device=z_packed.device,
             dtype=z_packed.dtype,
             expand_unknown_pixels=reinject_expand_px,
+            dilate_tokens=reinject_mask_dilate,
         )
-        if reinject_mask_dilate > 0:
-            mask_token_reinject = dilate_token_mask(
-                mask_token_reinject, token_hw, reinject_mask_dilate
+        late_mask_token_reinject = None
+        if late_mask_np is not None:
+            late_mask_token_reinject = self._build_reinject_mask_token(
+                mask_np=late_mask_np,
+                token_hw=token_hw,
+                device=z_packed.device,
+                dtype=z_packed.dtype,
+                expand_unknown_pixels=reinject_expand_px,
+                dilate_tokens=reinject_mask_dilate,
             )
 
         # Replace unknown region with Gaussian noise
@@ -285,6 +289,9 @@ class BCOTHVEPipeline:
                 reference_image=image,
                 vae_observed_color_fix=vae_observed_color_fix,
                 color_fix_config=config,
+                late_mask_np=late_mask_np,
+                late_reinject_mask_token=late_mask_token_reinject,
+                late_edit_steps=late_edit_steps,
             )
         else:
             result_image = self._edit_via_pipe(
@@ -303,6 +310,8 @@ class BCOTHVEPipeline:
                 reference_image=image,
                 vae_observed_color_fix=vae_observed_color_fix,
                 color_fix_config=config,
+                late_mask_np=late_mask_np,
+                late_edit_steps=late_edit_steps,
             )
 
         # ------------------------------------------------------------------
@@ -379,6 +388,39 @@ class BCOTHVEPipeline:
             ref_t = ref_t.unsqueeze(0)
         return ref_t
 
+    @staticmethod
+    def _coerce_mask_np(mask: Union[str, np.ndarray, torch.Tensor]) -> np.ndarray:
+        if isinstance(mask, str):
+            mask_img = Image.open(mask).convert("L")
+            mask_np = np.array(mask_img.resize((512, 512))) / 255.0
+            return mask_np.astype(np.float32).reshape(1, 1, 512, 512)
+        if isinstance(mask, np.ndarray):
+            return mask.astype(np.float32)
+        return mask.detach().float().cpu().numpy().astype(np.float32)
+
+    @staticmethod
+    def _build_reinject_mask_token(
+        mask_np: np.ndarray,
+        token_hw: Tuple[int, int],
+        device: torch.device,
+        dtype: torch.dtype,
+        expand_unknown_pixels: int,
+        dilate_tokens: int,
+    ) -> torch.Tensor:
+        mask_token_reinject = reinject_mask_token_expanded_unknown(
+            mask_np,
+            token_hw,
+            batch_size=1,
+            device=device,
+            dtype=dtype,
+            expand_unknown_pixels=expand_unknown_pixels,
+        )
+        if dilate_tokens > 0:
+            mask_token_reinject = dilate_token_mask(
+                mask_token_reinject, token_hw, dilate_tokens
+            )
+        return mask_token_reinject
+
     @torch.no_grad()
     def _edit_via_pipe(
         self,
@@ -397,6 +439,8 @@ class BCOTHVEPipeline:
         reference_image: Optional[Image.Image] = None,
         vae_observed_color_fix: bool = True,
         color_fix_config: Optional[Dict[str, Any]] = None,
+        late_mask_np: Optional[np.ndarray] = None,
+        late_edit_steps: int = 0,
     ) -> Image.Image:
         """Original Phase C: delegate to the pipeline black-box."""
         tok_h, tok_w = token_hw
@@ -424,6 +468,20 @@ class BCOTHVEPipeline:
             dtype=z_4d.dtype,
         )
         self.wrapper.edit_scheduler.set_external_guidance_mask(external_mask)
+        if late_mask_np is not None and int(late_edit_steps) > 0:
+            late_external_mask = _manual_mask_to_token_space(
+                manual_mask=late_mask_np,
+                latent_hw=(tok_h, tok_w),
+                batch_size=1,
+                device=z_4d.device,
+                dtype=z_4d.dtype,
+            )
+            self.wrapper.edit_scheduler.set_late_external_guidance_mask(
+                late_external_mask,
+                int(late_edit_steps),
+            )
+        else:
+            self.wrapper.edit_scheduler.set_late_external_guidance_mask(None, 0)
 
         pipe.scheduler = self.wrapper.edit_scheduler
         result_pil = pipe(
@@ -468,6 +526,9 @@ class BCOTHVEPipeline:
         reference_image: Optional[Image.Image] = None,
         vae_observed_color_fix: bool = True,
         color_fix_config: Optional[Dict[str, Any]] = None,
+        late_mask_np: Optional[np.ndarray] = None,
+        late_reinject_mask_token: Optional[torch.Tensor] = None,
+        late_edit_steps: int = 0,
     ) -> Image.Image:
         """Phase C with observed-region reinjection from inversion trajectory.
 
@@ -514,6 +575,20 @@ class BCOTHVEPipeline:
             dtype=z_packed.dtype,
         )
         self.wrapper.edit_scheduler.set_external_guidance_mask(external_mask)
+        if late_mask_np is not None and int(late_edit_steps) > 0:
+            late_external_mask = _manual_mask_to_token_space(
+                manual_mask=late_mask_np,
+                latent_hw=(tok_h, tok_w),
+                batch_size=1,
+                device=z_packed.device,
+                dtype=z_packed.dtype,
+            )
+            self.wrapper.edit_scheduler.set_late_external_guidance_mask(
+                late_external_mask,
+                int(late_edit_steps),
+            )
+        else:
+            self.wrapper.edit_scheduler.set_late_external_guidance_mask(None, 0)
 
         # -- Set up sigma schedule --
         edit_sched = self.wrapper.edit_scheduler
@@ -535,9 +610,15 @@ class BCOTHVEPipeline:
 
         m = reinject_mask_token  # [1, N, 1], 1=unknown 0=observed (may widen hole vs. edit mask)
         z = z_packed    # [2, N, C]
+        late_steps = min(max(int(late_edit_steps), 0), num_edit_steps)
+        use_late_reinject_mask = late_reinject_mask_token is not None and late_steps > 0
 
         # -- Manual denoising loop with reinjection --
         for j, t in enumerate(timesteps):
+            step_mask = m
+            if use_late_reinject_mask and j >= num_edit_steps - late_steps:
+                step_mask = late_reinject_mask_token
+
             # Index into inv_trajectory: map edit step j → inversion step
             reinject_idx = T - K - j
             reinject_idx = max(0, min(reinject_idx, len(inv_trajectory) - 1))
@@ -545,10 +626,10 @@ class BCOTHVEPipeline:
             z_inv_batch = z_inv.expand(2, -1, -1)  # [2, N, C]
 
             # Reinject observed tokens from inversion trajectory
-            z = reinject_observed_tokens(z, z_inv_batch, m)
+            z = reinject_observed_tokens(z, z_inv_batch, step_mask)
 
             if debug and j % 10 == 0:
-                obs_diff = (z[:1] - z_inv)[:, m[0, :, 0] < 0.5, :].abs().mean()
+                obs_diff = (z[:1] - z_inv)[:, step_mask[0, :, 0] < 0.5, :].abs().mean()
                 print(
                     f"[reinject] step {j}/{num_edit_steps} "
                     f"reinject_idx={reinject_idx} "
@@ -576,7 +657,8 @@ class BCOTHVEPipeline:
         # (inv_trajectory[0] = z at sigma=0, the original image latent)
         if len(inv_trajectory) > 0:
             z_clean = inv_trajectory[0].expand(2, -1, -1)
-            z = reinject_observed_tokens(z, z_clean, m)
+            final_mask = late_reinject_mask_token if use_late_reinject_mask else m
+            z = reinject_observed_tokens(z, z_clean, final_mask)
 
         # -- Decode --
         z_src = z[:1]  # [1, N, C]

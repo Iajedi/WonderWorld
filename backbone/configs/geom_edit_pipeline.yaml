@@ -1,20 +1,20 @@
 # EditPipeline (edit.geom_controller): inpaint → compose → seam refine
 # Mask files: 1 = unknown / region to change (same convention as inpaint.yaml)
 
-# inputs:
-#   # src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
-#   src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source.png
-#   # Target plate for composition (same file = self-composite / alignment smoke test)
-#   # tgt: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
-#   tgt: inputs/snowman.jpg
+inputs:
+  # src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
+  src: backbone/inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source.png
+  # Target plate for composition (same file = self-composite / alignment smoke test)
+  # tgt: inputs/freefine/.freefine_checkout/Examples/Editing/2D/bear/source.png
+  tgt: backbone/inputs/snowman.jpg
 
 # inputs:
 #   src: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/source.png
 #   tgt: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/target.png
 
-inputs:
-  src: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source.png
-  tgt: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target.png
+# inputs:
+#   src: backbone/inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source.png
+#   tgt: backbone/inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target.png
 
 # geometry:
 #   edit_type: move
@@ -45,19 +45,18 @@ inputs:
 #   prompt_refine: >-
 #     A small, textured orange teddy bear figurine wearing a blue knitted sweater adorned with colorful embroidered flowers. It features a pink bow and a white flower tucked by its ear, giving it a charming, handcrafted appearance.
 
-# geometry:
-#   edit_type: compose_multi
-#   prompt_inpaint: >-
-#     Indoor table scene with soft, blurred background, with a log platter, plant vase and cup.
-#   prompt_refine: >-
-#     A snowman with a yellow hat and scarf on a log platter, against a soft, blurred table background. The scarf has white ends
-#   removal_masks:
-#     - inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png
-
-#   compose:
-#     - paste_mask: inputs/snowman_mask.png
-#       dy: -40
-#       scale: 0.75
+geometry:
+  edit_type: compose_multi
+  prompt_inpaint: >-
+    Indoor table scene with soft, blurred background, with a log platter, plant vase and cup.
+  prompt_refine: >-
+    A snowman with a yellow hat and scarf sitting on a log platter, against a soft, blurred table background. The scarf has white ends
+  removal_masks:
+    - backbone/inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png
+  compose:
+    - paste_mask: backbone/inputs/snowman_mask.png
+      dy: -40
+      scale: 0.75
 
 # geometry:
 #   edit_type: compose_multi
@@ -70,18 +69,18 @@ inputs:
 #   compose:
 #     - paste_mask: inputs/freefine/.freefine_checkout/Examples/Compose/pair1/target_mask.png
 
-geometry:
-  edit_type: compose_multi
-  prompt_inpaint: >-
-    Indoor scene with blurred background of dark interior tabletop.
-  prompt_refine: >-
-    A bishop and queen chess pieces on a dark interior tabletop against a dark, blurred background.
-  removal_masks:
-    - inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source_mask.png
-  compose:
-    - paste_mask: inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target_mask.png
-      dx: 100
-      dy: -30
+# geometry:
+#   edit_type: compose_multi
+#   prompt_inpaint: >-
+#     Indoor scene with blurred background of dark interior tabletop.
+#   prompt_refine: >-
+#     A bishop and queen chess pieces on a dark interior tabletop against a dark, blurred background.
+#   removal_masks:
+#     - backbone/inputs/freefine/.freefine_checkout/Examples/Compose/pair2/source_mask.png
+#   compose:
+#     - paste_mask: backbone/inputs/freefine/.freefine_checkout/Examples/Compose/pair2/target_mask.png
+#       dx: 100
+#       dy: -30
 # geometry:
 #   edit_type: resize
 #   mask_src: inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png
@@ -95,12 +94,16 @@ geometry:
 seam_band_kernel: 5
 seam_blur_radius: 2.0
 # Asymmetric taper: smaller => steeper falloff *into* the mask; larger => gentler *outside*
-seam_sigma_inside: 1.0
+seam_sigma_inside: 1
 seam_sigma_outside: 12.0
 
 # --- BCOTHVE / UniEdit (same knobs as configs/inpaint.yaml) ---
 T: 50
 K: 10
+# Geometry second pass only: for the final L active edit steps, expand the
+# seam mask to seam + target object so appearance can harmonise with the scene
+# while the earlier seam-only steps keep the pasted structure anchored.
+L: 10
 warm_method: ot_harmonic
 
 lambda_pos: 0.1
@@ -130,5 +133,6 @@ alpha_edit: 0.4
 observed_reinject: true
 reinject_unknown_expand_px: 12
 reinject_mask_dilate: 3
+vae_observed_color_fix: true
 
 debug: false

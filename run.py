@@ -21,6 +21,14 @@ from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler
 from diffusers import FluxFillPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
 from diffusers import Flux2KleinPipeline
 from backbone.edit.controller import BCOTHVEPipeline
+from backbone.edit.geom_controller import EditPipeline
+from backbone.edit.socket_edit import (
+    EditPayloadError,
+    build_socket_geometry_spec,
+    decode_edit_payload,
+    image_to_png_data_url,
+    masked_source_for_caption,
+)
 
 from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
@@ -94,6 +102,10 @@ undo = False
 save = False
 delete = False
 exclude_sky = False
+runtime_config = None
+edit_pipeline = None
+edit_pipeline_config = None
+edit_lock = threading.Lock()
 
 # Event object used to control the synchronization
 start_event = threading.Event()
@@ -116,10 +128,12 @@ def seeding(seed):
 
 
 def run(config):
-    global client_id, view_matrix, scene_name, latest_frame, keep_rendering, kf_gen, latest_viz, gaussians, opt, background, scene_dict, style_prompt, pt_gen, change_scene_name_by_user, undo, save, delete, exclude_sky, view_matrix_delete
+    global client_id, view_matrix, scene_name, latest_frame, keep_rendering, kf_gen, latest_viz, gaussians, opt, background, scene_dict, style_prompt, pt_gen, change_scene_name_by_user, undo, save, delete, exclude_sky, view_matrix_delete, runtime_config, edit_pipeline, edit_pipeline_config
 
     ###### ------------------ Load modules ------------------ ######
 
+    runtime_config = config
+    edit_pipeline_config = _load_edit_pipeline_config()
     seeding(config["seed"])
     example = config['example_name']
 
@@ -146,6 +160,7 @@ def run(config):
         #     torch_dtype=torch.bfloat16,
         # ).to(device)
         inpainter_pipeline = BCOTHVEPipeline(offload=False, model="klein", device="cuda:1")
+        edit_pipeline = EditPipeline(base_pipeline=inpainter_pipeline)
     else:
         # Use SD checkpoint
         inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
@@ -156,6 +171,7 @@ def run(config):
         inpainter_pipeline.scheduler = DDIMScheduler.from_config(inpainter_pipeline.scheduler.config)
         inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
         inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
+        edit_pipeline = None
 
     
     rotation_path = config['rotation_path'][:config['num_scenes']]
@@ -588,6 +604,221 @@ def train_gaussian(gaussians: GaussianModel, scene: Scene, opt: GSParams, save_d
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
+
+def _load_edit_pipeline_config():
+    config_path = Path(__file__).resolve().parent / "backbone" / "configs" / "geom_edit_pipeline.yaml"
+    raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    return {k: v for k, v in raw.items() if k not in ("geometry", "inputs")}
+
+
+def _emit_edit_status(room, stage, message):
+    socketio.emit("edit_status", {"stage": stage, "message": message}, room=room)
+
+
+def _emit_edit_error(room, message, details=None):
+    payload = {"message": message}
+    if details is not None:
+        payload["details"] = details
+    socketio.emit("edit_error", payload, room=room)
+
+
+def _process_edit_submit(data, room):
+    global pt_gen, edit_pipeline, edit_pipeline_config, runtime_config
+
+    if not edit_lock.acquire(blocking=False):
+        _emit_edit_error(room, "Another edit is already running. Please wait for it to finish.")
+        return
+
+    try:
+        if edit_pipeline is None:
+            raise RuntimeError("Edit geometry requires config['use_flux'] so the BCOTHVE/FLUX pipeline is available.")
+        if pt_gen is None:
+            raise RuntimeError("Gemini prompt generator is not ready yet.")
+        if runtime_config is None or edit_pipeline_config is None:
+            raise RuntimeError("Wonderworld runtime is not initialized yet.")
+
+        _emit_edit_status(room, "payload_received", "Edit payload received.")
+        decoded = decode_edit_payload(data)
+        _emit_edit_status(room, "images_decoded", "All edit images decoded as 512x512 PNGs.")
+        _emit_edit_status(room, "mask_processed", "Source and target masks normalized to binary masks.")
+
+        masked_source = masked_source_for_caption(decoded.source_image, decoded.source_mask)
+        _emit_edit_status(room, "original_region_removed", "Original selected region removed for captioning.")
+
+        source_caption = pt_gen.describe_edit_source_without_mask(masked_source)
+        _emit_edit_status(room, "caption_generated", "Source-scene caption generated.")
+
+        composed_caption = None
+
+        def describe_composed(composed_image):
+            nonlocal composed_caption
+            _emit_edit_status(room, "flux_pass_complete", "First edit composition pass complete.")
+            composed_caption = pt_gen.describe_composed_edit_image(composed_image)
+            _emit_edit_status(room, "composed_image_described", "Composed image description generated.")
+            return composed_caption
+
+        spec = build_socket_geometry_spec(decoded, source_caption, source_caption)
+        output_dir = str(Path(kf_gen.run_dir) / "edit_geom") if kf_gen is not None else "outputs/edit_geom"
+        result = edit_pipeline.run(
+            src_image=decoded.source_image,
+            tgt_image=decoded.target_image,
+            spec=spec,
+            config=edit_pipeline_config,
+            output_dir=output_dir,
+            composition_prompt_callback=describe_composed,
+        )
+
+        _apply_edit_result_to_scene(
+            result,
+            decoded,
+            room,
+            runtime_config,
+            composed_caption or source_caption,
+            source_caption,
+        )
+        socketio.emit(
+            "edit_result",
+            {
+                "image": image_to_png_data_url(result),
+                "metadata": {
+                    "edit_type": decoded.edit_type,
+                    "prompt_src": source_caption,
+                    "prompt_tgt": composed_caption or source_caption,
+                },
+            },
+            room=room,
+        )
+    except EditPayloadError as exc:
+        _emit_edit_error(room, str(exc), {"type": exc.__class__.__name__})
+    except Exception as exc:
+        _emit_edit_error(room, "Edit processing failed.", {"type": exc.__class__.__name__, "message": str(exc)})
+        raise
+    finally:
+        edit_lock.release()
+
+
+def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_description, layer_scene_description=None):
+    global kf_gen, gaussians, opt, background, view_matrix_wonder
+
+    if kf_gen is None or gaussians is None or opt is None:
+        raise RuntimeError("Cannot apply edit before the Wonderworld scene is initialized.")
+
+    device = config["device"]
+    current_pt3d_cam = kf_gen.get_camera_by_js_view_matrix(view_matrix_wonder, xyz_scale=xyz_scale)
+    tdgs_cam = convert_pt3d_cam_to_3dgs_cam(current_pt3d_cam, xyz_scale=xyz_scale)
+    kf_gen.set_current_camera(current_pt3d_cam, archive_camera=True)
+    with torch.no_grad():
+        edit_render_pkg = render(tdgs_cam, gaussians, opt, background)
+    kf_gen.image_latest = ToTensor()(result_image.convert("RGB")).unsqueeze(0).to(device)
+
+    source_region = decoded.source_mask_tensor if decoded.removes_source_region else torch.zeros_like(decoded.source_mask_tensor)
+    edit_mask = torch.maximum(source_region, decoded.target_mask_tensor).unsqueeze(0).to(device)
+    edit_mask_float = edit_mask.float()
+    if config["use_flux"]:
+        k = 5 * int(np.ceil(BCOT_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
+        k = min(k, 31)
+        dilated_edit_mask = (dilation(edit_mask_float, kernel=torch.ones(k, k, device=device)) > 0.5).to(edit_mask_float.dtype)
+    else:
+        dilated_edit_mask = edit_mask_float
+
+    gaussians.delete_regions(tdgs_cam, edit_mask)
+    _emit_edit_status(room, "existing_region_removed", "Existing Gaussians removed from the edited region.")
+
+    _emit_edit_status(room, "depth_prediction_started", "Depth prediction started.")
+    with torch.no_grad():
+        kf_gen.get_depth(kf_gen.image_latest, archive_output=True, diffusion_steps=30, guidance_steps=8)
+    sem_seg = kf_gen.update_sky_mask()
+    recomposed = soft_stitching(edit_render_pkg["render"], kf_gen.image_latest, kf_gen.sky_mask_latest)
+    depth_should_be = edit_render_pkg["median_depth"][0:1].unsqueeze(0) / xyz_scale
+    mask_to_align_depth = (depth_should_be < 0.006 * 0.8) & (depth_should_be > 0.001)
+    ground_mask = kf_gen.generate_ground_mask(sem_map=sem_seg)[None, None]
+    depth_should_be_ground = kf_gen.compute_ground_depth(camera_height=0.0003)
+    ground_outputable_mask = (depth_should_be_ground > 0.001) & (depth_should_be_ground < 0.006 * 0.8)
+    joint_mask = mask_to_align_depth | (ground_mask & ground_outputable_mask)
+    depth_should_be_joint = torch.where(mask_to_align_depth, depth_should_be, depth_should_be_ground)
+    with torch.no_grad():
+        kf_gen.get_depth(
+            kf_gen.image_latest,
+            target_depth=depth_should_be_joint,
+            mask_align=joint_mask,
+            archive_output=True,
+            diffusion_steps=30,
+            guidance_steps=8,
+        )
+    kf_gen.refine_disp_with_segments(no_refine_mask=ground_mask.squeeze().cpu().numpy())
+    kf_gen.image_latest = recomposed
+    _emit_edit_status(room, "depth_prediction_completed", "Depth prediction completed.")
+
+    if config["gen_layer"]:
+        _emit_edit_status(room, "layer_generation_started", "Layer generation started.")
+        layer_prompt = layer_scene_description or scene_description
+        kf_gen.generate_layer(
+            pred_semantic_map=sem_seg,
+            scene_name=layer_prompt,
+            force_mask_disocclusion=dilated_edit_mask.bool(),
+        )
+
+        depth_should_be = kf_gen.depth_latest_init
+        mask_to_align_depth = ~(kf_gen.mask_disocclusion.bool()) & (depth_should_be < 0.006 * 0.8)
+        mask_to_farther_depth = kf_gen.mask_disocclusion.bool() & (depth_should_be < 0.006 * 0.8)
+        with torch.no_grad():
+            kf_gen.depth, kf_gen.disparity = kf_gen.get_depth(
+                kf_gen.image_latest,
+                archive_output=True,
+                target_depth=depth_should_be,
+                mask_align=mask_to_align_depth,
+                mask_farther=mask_to_farther_depth,
+                diffusion_steps=30,
+                guidance_steps=8,
+            )
+        kf_gen.refine_disp_with_segments(
+            no_refine_mask=ground_mask.squeeze().cpu().numpy(),
+            existing_mask=~(kf_gen.mask_disocclusion).bool().squeeze().cpu().numpy(),
+            existing_disp=kf_gen.disparity_latest_init.squeeze().cpu().numpy(),
+        )
+        wrong_depth_mask = kf_gen.depth_latest < kf_gen.depth_latest_init
+        kf_gen.depth_latest[wrong_depth_mask] = kf_gen.depth_latest_init[wrong_depth_mask] + 0.0001
+        kf_gen.depth_latest = (
+            kf_gen.mask_disocclusion * kf_gen.depth_latest
+            + (1 - kf_gen.mask_disocclusion) * kf_gen.depth_latest_init
+        )
+        kf_gen.update_sky_mask()
+        valid_px_mask = dilated_edit_mask * (~kf_gen.sky_mask_latest)
+        kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)
+        kf_gen.update_current_pc_by_kf(
+            image=kf_gen.image_latest_init,
+            depth=kf_gen.depth_latest_init,
+            valid_mask=kf_gen.mask_disocclusion * dilated_edit_mask,
+            gen_layer=True,
+        )
+        kf_gen.archive_latest()
+
+        traindata, traindata_layer = kf_gen.convert_to_3dgs_traindata_latest_layer(xyz_scale=xyz_scale)
+        gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
+        layer_scene = Scene(traindata_layer, gaussians, opt)
+        save_dir = Path(config["runs_dir"]) / f"{datetime.now().strftime('%d-%m_%H-%M-%S')}_gaussian_scene_edit_layer"
+        train_gaussian(gaussians, layer_scene, opt, save_dir)
+    else:
+        valid_px_mask = dilated_edit_mask * (~kf_gen.sky_mask_latest)
+        kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)
+        kf_gen.archive_latest()
+        traindata = kf_gen.convert_to_3dgs_traindata_latest(xyz_scale=xyz_scale, use_no_loss_mask=False)
+        _emit_edit_status(room, "layer_generation_started", "Gaussian scene update started.")
+
+    if traindata["pcd_points"].shape[-1] == 0:
+        gaussians.set_inscreen_points_to_visible(tdgs_cam)
+    else:
+        gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
+        scene = Scene(traindata, gaussians, opt)
+        save_dir = Path(config["runs_dir"]) / f"{datetime.now().strftime('%d-%m_%H-%M-%S')}_gaussian_scene_edit"
+        train_gaussian(gaussians, scene, opt, save_dir)
+        gaussians.set_inscreen_points_to_visible(tdgs_cam)
+
+    _emit_edit_status(room, "layer_generation_completed", "Layer generation and Gaussian scene update completed.")
+
+    kf_gen.increment_kf_idx()
+    empty_cache()
+
 def start_server(port):
     socketio.run(app, host='0.0.0.0', port=port)
 
@@ -653,6 +884,11 @@ def handle_fill_hole():
     print('Received fill hole signal.')
     global exclude_sky
     exclude_sky = True 
+
+@socketio.on('edit_submit')
+def handle_edit_submit(data):
+    print('Received edit submit signal.')
+    socketio.start_background_task(_process_edit_submit, data, request.sid)
     
     
 # opt_render = GSParams()
