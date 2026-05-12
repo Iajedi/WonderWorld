@@ -178,7 +178,7 @@ class GeminiTextpromptGen:
 
         system = (
             "You are an intelligent scene generator. Given a scene and there are 3 most significant common entities. "
-            "please generate a brief background prompt about 50 words describing common things in the scene. "
+            "please generate a brief background prompt about 20 words describing common things in the scene. "
             "You should not mention the entities in the background prompt. If needed, you can make reasonable guesses. "
             "Reply with only the background text, no JSON and no extra commentary."
         )
@@ -293,7 +293,7 @@ class GeminiTextpromptGen:
             "You describe images for inpainting conditioning. Clearly separate **foreground** (main subjects, "
             "nearby objects, terrain, structures in front) and **background** (sky, horizon, distant scenery). "
             "Only state what is visibly present; do not invent occluded content. "
-            "Reply with plain prose only, 2 - 5 short sentences, no JSON or bullet labels."
+            "Reply with plain prose only, 1 - 2 short sentences, no JSON or bullet labels."
         )
         g = _require_genai()
         model_src = g.GenerativeModel(self.model, system_instruction=system_src)
