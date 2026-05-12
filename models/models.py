@@ -425,13 +425,13 @@ class FrameSyn(torch.nn.Module):
                     "reinject_mask_dilate": 1 if is_content_inpainting else 0,
                     "observed_reinject": True,
                     "lambda_pos": 0.1,
-                    "lambda_bdry": 1.0,
+                    "lambda_bdry": 2.5,
                     "tau": 0.05,
                     "sinkhorn_iters": 100,
-                    "lambda_s": 0.5,
+                    "lambda_s": 0.2,
                     "connectivity": 8,
                     "alpha_start": 0.96,
-                    "alpha_end": 0.6,
+                    "alpha_end": 0.8,
                     "boundary_band_width": 3,
                     "warm_layers": [
                         ["double", 0],
@@ -1131,9 +1131,10 @@ class KeyframeGen(FrameSyn):
                     ToPILImage()(mask_image.float()[0]).save(self.run_dir / f"{layer:02d}_mask.png")
                     
                     # Inpaint init_image using inpaint_cv2()
-                    mask_image_eroded = dilation(mask_image,
-                                    kernel=torch.ones(10, 10).cuda()
-                                    )
+                    mask_image_eroded = dilation(
+                        mask_image,
+                        kernel=torch.ones(10, 10, device=mask_image.device, dtype=mask_image.dtype),
+                    )
                     init_image = inpaint_cv2(init_image, mask_image_eroded)
                     init_image = init_image.to(self.device)
                     ToPILImage()(init_image[0]).save(self.run_dir / f"{layer:02d}_inpainted_init_image.png")

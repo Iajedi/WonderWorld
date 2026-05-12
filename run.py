@@ -198,11 +198,33 @@ def run(config):
     kf_gen.image_latest = ToTensor()(start_keyframe).unsqueeze(0).to(config['device'])
     
     if config['gen_sky_image'] or (not os.path.exists(f'examples/sky_images/{example}/sky_0.png') and not os.path.exists(f'examples/sky_images/{example}/sky_1.png')):
-        syncdiffusion_model = SyncDiffusion(config['device'], sd_version='2.0-inpaint')
+        syncdiffusion_model = SyncDiffusion("cuda:1", sd_version='2.0-inpaint')
     else:
         syncdiffusion_model = None
     sky_mask = kf_gen.generate_sky_mask().float()
-    kf_gen.generate_sky_pointcloud(syncdiffusion_model, image=kf_gen.image_latest, mask=sky_mask, gen_sky=config['gen_sky_image'], style=style_prompt)
+
+    # Free cuda:1 while SyncDiffusion generates all sky images, then restore.
+    # inpainter_pipeline (BCOTHVEPipeline) and edit_pipeline share the same
+    # underlying wrapper, so moving one moves both.  For the SD case the
+    # inpainter lives on a different GPU (config["device"]) so offloading it
+    # is a no-op cost-wise but still safe.
+    _inpainter_home_device = (
+        inpainter_pipeline.device          # BCOTHVEPipeline: stored str, never changes
+        if config["use_flux"]
+        else str(inpainter_pipeline.device)  # HF pipeline: reflect before offload
+    ) if syncdiffusion_model is not None else None
+    if syncdiffusion_model is not None:
+        inpainter_pipeline.to('cpu')
+        empty_cache()
+    try:
+        kf_gen.generate_sky_pointcloud(syncdiffusion_model, image=kf_gen.image_latest, mask=sky_mask, gen_sky=config['gen_sky_image'], style=style_prompt)
+    finally:
+        # Release SyncDiffusion memory before restoring the inpainter so the
+        # restore itself does not trigger another OOM.
+        syncdiffusion_model = None
+        empty_cache()
+        if _inpainter_home_device is not None:
+            inpainter_pipeline.to(_inpainter_home_device)
 
     kf_gen.recompose_image_latest_and_set_current_pc(scene_name=scene_name)
     

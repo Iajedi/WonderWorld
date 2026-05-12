@@ -92,6 +92,16 @@ class BCOTHVEPipeline:
             self.wrapper = FluxUniEditFlowPipeline(offload=offload, device=self.device)
         self.model_type = model
 
+    def to(self, device: str) -> "BCOTHVEPipeline":
+        """Move the underlying model weights to *device*.
+
+        ``self.device`` (the configured home device) is intentionally left
+        unchanged so that callers can restore the model with
+        ``pipeline.to(pipeline.device)`` after a temporary CPU offload.
+        """
+        self.wrapper.pipe.to(device)
+        return self
+
     @torch.no_grad()
     def run(
         self,

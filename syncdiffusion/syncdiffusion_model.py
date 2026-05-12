@@ -134,6 +134,10 @@ class SyncDiffusion(nn.Module):
         # obtain text embeddings
         text_embeds = self.get_text_embeds(prompts, negative_prompts)  # [2, 77, 768]
 
+        if condition:
+            inpaint_mask = inpaint_mask.to(self.device)
+            rendered_image = rendered_image.to(self.device)
+
         # define a list of windows to process in parallel
         views = get_views(height, width, window_size=latent_size, 
                           stride=stride, loop_closure=loop_closure)
@@ -332,6 +336,9 @@ class SyncDiffusion(nn.Module):
 
         # obtain text embeddings
         text_embeds = self.get_text_embeds(prompts, negative_prompts)  # [2, 77, 768]
+
+        rendered_image = rendered_image.to(self.device)
+        inpaint_mask = inpaint_mask.to(self.device)
 
         # define a list of windows to process in parallel
         views = get_views(height, width, window_size=latent_size, 
