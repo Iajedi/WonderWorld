@@ -1,5 +1,5 @@
-runs_dir: output/snowman
-example_name: snowman
+runs_dir: output/tokyo
+example_name: tokyo
 # city_hall, real_campus_2, venice
 
 
@@ -25,7 +25,7 @@ inpainting_resolution_interp: 512
 inpainting_resolution_gen: 512
 
 # re-generate sky panorama images
-gen_sky_image: False
+gen_sky_image: True
 # generate sky point cloud
 gen_sky: True
 

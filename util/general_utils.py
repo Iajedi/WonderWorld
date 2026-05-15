@@ -2,7 +2,7 @@ import kornia
 import numpy as np
 import torch
 from matplotlib import cm
-from torchvision.io import write_video
+# from torchvision.io import write_video
 import imageio
 
 
@@ -63,16 +63,26 @@ def apply_depth_colormap(
     return colored_image
 
 
-def save_video(video, path, fps=10, save_gif=True):
-    video = video.permute(0, 2, 3, 1)
-    video_codec = "libx264"
-    video_options = {
-        "crf": "30",  # Constant Rate Factor (lower value = higher quality, 18 is a good balance)
-        "preset": "slow",
-    }
-    write_video(str(path), video, fps=fps, video_codec=video_codec, options=video_options)
-    if not save_gif:
-        return
-    video_np = video.cpu().numpy()
-    gif_path = str(path).replace('.mp4', '.gif')
-    imageio.mimsave(gif_path, video_np, duration=1000/fps, loop=0)
+# def save_video(video, path, fps=10, save_gif=True):
+#     video = video.permute(0, 2, 3, 1)
+#     video_codec = "libx264"
+#     video_options = {
+#         "crf": "30",  # Constant Rate Factor (lower value = higher quality, 18 is a good balance)
+#         "preset": "slow",
+#     }
+#     write_video(str(path), video, fps=fps, video_codec=video_codec, options=video_options)
+#     if not save_gif:
+#         return
+#     video_np = video.cpu().numpy()
+#     gif_path = str(path).replace('.mp4', '.gif')
+#     imageio.mimsave(gif_path, video_np, duration=1000/fps, loop=0)
+
+def save_video(frames, path, fps=10):
+    if isinstance(frames, torch.Tensor):
+        frames = frames.detach().cpu()
+        if frames.dtype != torch.uint8:
+            frames = (frames.clamp(0, 1) * 255).to(torch.uint8)
+        frames = frames.numpy()
+
+    frames = np.asarray(frames)
+    imageio.mimwrite(path, frames, fps=fps, codec="libx264")

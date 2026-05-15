@@ -1,9 +1,9 @@
-runs_dir: output/snowman
-example_name: snowman
+runs_dir: output/worldscore 
+example_name: worldscore
 # city_hall, real_campus_2, venice
 
 
-seed: 42
+seed: 1
 # enable guided depth diffusion
 depth_conditioning: True
 
@@ -27,7 +27,7 @@ inpainting_resolution_gen: 512
 # re-generate sky panorama images
 gen_sky_image: False
 # generate sky point cloud
-gen_sky: True
+gen_sky: False
 
 # enable layer-wise generation
 gen_layer: True

@@ -1,5 +1,5 @@
-runs_dir: output/venice
-example_name: venice
+runs_dir: output/flux_village
+example_name: village
 
 seed: 1
 # enable guided depth diffusion

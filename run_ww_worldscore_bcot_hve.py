@@ -1,14 +1,14 @@
-"""Run WonderWorld WorldScore benchmarks with BCOT-HVE and Gemini text generation enabled.
+"""Run WonderWorld WorldScore benchmarks with BCOT-HVE and InternLM text generation.
 
 This entrypoint keeps the WorldScore data flow from ``run_ww_worldscore.py``
-while replacing the Stable Diffusion inpaint backend with ``BCOTHVEPipeline``
-and the ChatGPT4 prompt generator with ``GeminiTextpromptGen``.
+while replacing the Stable Diffusion inpaint backend with ``BCOTHVEPipeline``.
+``run_ww_worldscore.py`` already imports ``TextpromptGen`` from
+``util.internlm`` (OpenAI-compatible interface pointing at the local InternLM
+server), so no monkey-patching of the class is required.
 
-Gemini text generation produces concise BCOT src/tgt prompt pairs for each
-inpaint step: ``prompt_src`` describes the conditioning frame (vision call) and
-``prompt_tgt`` extends it seamlessly into the WorldScore target scene (text
-call).  WorldScore still supplies the raw scene prompts; ``use_gpt`` (next-scene
-LLM generation) remains disabled.
+BCOT prompt enrichment produces concise ``prompt_src`` / ``prompt_tgt`` pairs
+for each inpaint step (vision + text). WorldScore still supplies the raw scene
+prompts; ``use_gpt`` (next-scene LLM generation) remains disabled.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ import os
 from argparse import ArgumentParser
 
 # ``run_ww_worldscore.py`` imports ``util.chatGPT4`` at module import time.
-# The benchmark path does not use that client, but the OpenAI SDK still expects
-# an API key to exist when the module-level client is constructed.
+# BCOT prompt enrichment uses ``util.internlm`` (OpenAI); set a real
+# ``OPENAI_API_KEY`` when not passing ``--no_gemini``. The default below only
+# satisfies chatGPT4 import-time initialization if nothing is set.
 os.environ.setdefault("OPENAI_API_KEY", "unused-for-worldscore-bcot-hve")
 
 
@@ -95,44 +96,47 @@ def _install_bcot_hve_backend(ww_module) -> None:
     ww_module.DDIMScheduler = _NoOpScheduler
 
 
-def _install_gemini_text_gen(ww_module, style: str = "photorealistic") -> None:
-    """Replace TextpromptGen with GeminiTextpromptGen and wire BCOT prompt generation.
+def _install_gemini_text_gen(ww_module) -> None:
+    """Replace ``TextpromptGen`` with OpenAI-backed ``util.internlm.TextpromptGen`` and wire BCOT prompts.
 
     Two changes are made to ``ww_module``:
 
-    1. ``ww_module.TextpromptGen`` is replaced with ``GeminiTextpromptGen`` so
-       that ``ww_module.run()`` instantiates a Gemini-backed ``pt_gen``.
+    1. ``ww_module.TextpromptGen`` is set to ``util.internlm.TextpromptGen`` so
+       that ``ww_module.run()`` instantiates an OpenAI-backed ``pt_gen``.
+
+       Legacy: this hook previously assigned ``GeminiTextpromptGen`` from
+       ``util.gemini_prompt_gen``; that class remains imported as
+       ``_GeminiTextpromptGen`` for reference (not used as the active backend).
 
     2. ``KeyframeGen.inpaint`` is wrapped to call
        ``pt_gen.build_bcot_inpaint_pair_from_conditioning_image`` before each
        inpaint step.  WorldScore still supplies the raw scene prompts.
 
-    **First image**: Gemini is not applied.  ``ww_module.pt_gen`` is ``None``
-    until ``run()`` sets it at line 172 (after the first-frame point-cloud and
-    sky bootstrap at line 169), so any inpaint that happens during sky
-    initialisation is passed through unchanged.
+    **First image**: Enrichment is not applied when ``pt_gen`` is ``None`` (sky
+    bootstrap / first frame).
 
-    **Subsequent images**: once ``pt_gen`` is a ``GeminiTextpromptGen``
-    instance, each inpaint call in the main scene loop gets Gemini enrichment:
-    the raw WorldScore prompt becomes the target-scene context for a two-call
-    Gemini pipeline (vision ``bcot_src`` + text ``bcot_tgt``).  Both
-    ``bcot_prompt_src`` and ``bcot_prompt_tgt`` are injected into the inpaint
-    kwargs so the BCOT pipeline uses the proper prompt pair rather than
-    falling back to ``self.inpainting_prompt`` for both sides.  On failure the
-    original WorldScore prompt is used unchanged.
+    **Subsequent images**: once ``pt_gen`` is the internlm class instance, each
+    inpaint call gets the same two-step ``prompt_src`` / ``prompt_tgt`` flow as
+    the former Gemini path.  Both ``bcot_prompt_src`` and ``bcot_prompt_tgt``
+    are injected into the inpaint kwargs so the BCOT pipeline uses the proper
+    prompt pair.  On failure the original WorldScore prompt is used unchanged.
     """
-    from util.gemini_prompt_gen import GeminiTextpromptGen
+    from util.gemini_prompt_gen import GeminiTextpromptGen as _GeminiTextpromptGen
+    from util.internlm import TextpromptGen as _OpenAITextpromptGen
 
-    ww_module.TextpromptGen = GeminiTextpromptGen
+    # Retain legacy Gemini class on the runner module (previous ``TextpromptGen`` patch target).
+    ww_module._GEMINI_TEXTPROMPT_GEN_CLASS = _GeminiTextpromptGen
+    ww_module.TextpromptGen = _OpenAITextpromptGen
 
     original_inpaint = ww_module.KeyframeGen.inpaint
 
     def inpaint_with_gemini_prompts(self, condition_image, *args, **kwargs):
         # pt_gen is None before run() sets it (sky bootstrap / first frame) —
-        # the isinstance guard below naturally skips Gemini in that phase.
+        # the isinstance guard below naturally skips enrichment in that phase.
         pt_gen = ww_module.pt_gen
-        if isinstance(pt_gen, GeminiTextpromptGen):
+        if isinstance(pt_gen, _OpenAITextpromptGen):
             ws_prompt = kwargs.get("inpainting_prompt")
+            print("ws_prompt: ", ws_prompt)
             # Skip if caller already supplied explicit BCOT prompts.
             if ws_prompt is not None and "bcot_prompt_src" not in kwargs:
                 ws_prompt_str = ws_prompt if isinstance(ws_prompt, str) else str(ws_prompt)
@@ -143,7 +147,7 @@ def _install_gemini_text_gen(ww_module, style: str = "photorealistic") -> None:
                 }
                 try:
                     bcot_src, bcot_tgt = pt_gen.build_bcot_inpaint_pair_from_conditioning_image(
-                        condition_image, style, scene_dict
+                        condition_image, ws_prompt.split(" ")[-1], scene_dict, worldscore=True
                     )
                     if bcot_tgt:
                         # Replace the raw WorldScore prompt with the enriched target.
@@ -153,7 +157,7 @@ def _install_gemini_text_gen(ww_module, style: str = "photorealistic") -> None:
                         kwargs["bcot_prompt_src"] = bcot_src
                         kwargs["bcot_prompt_tgt"] = bcot_tgt
                 except Exception as exc:
-                    print(f"[GeminiTextGen] BCOT prompt generation failed, using WorldScore prompt: {exc}")
+                    print(f"[InternLM/OpenAI BCOT] Prompt generation failed, using WorldScore prompt: {exc}")
         return original_inpaint(self, condition_image, *args, **kwargs)
 
     ww_module.KeyframeGen.inpaint = inpaint_with_gemini_prompts
@@ -210,6 +214,26 @@ def _install_sky_bootstrap(ww_module) -> None:
         return original_recompose(self, *args, **kwargs)
 
     ww_module.KeyframeGen.recompose_image_latest_and_set_current_pc = recompose_with_sky_bootstrap
+
+
+def _install_layer_prompt_from_current_kf(ww_module) -> None:
+    """Use the current WorldScore prompt for layer inpainting.
+
+    ``run_ww_worldscore.py`` calls ``generate_layer(..., scene_name=None)``,
+    which makes ``models.py`` fall back to the hard-coded "road, building"
+    base-layer prompt.  At that point ``set_kf_param`` has already copied the
+    current ``inpainting_prompt_list[i]`` entry into ``self.inpainting_prompt``,
+    so use that prompt whenever the caller does not provide an explicit
+    ``scene_name``.
+    """
+    original_generate_layer = ww_module.KeyframeGen.generate_layer
+
+    def generate_layer_with_current_prompt(self, *args, **kwargs):
+        if kwargs.get("scene_name") is None:
+            kwargs["scene_name"] = self.inpainting_prompt
+        return original_generate_layer(self, *args, **kwargs)
+
+    ww_module.KeyframeGen.generate_layer = generate_layer_with_current_prompt
 
 
 def _prepare_bcot_config(config, args):
@@ -289,14 +313,18 @@ def parse_args():
         "--gemini_style",
         default="photorealistic",
         help=(
-            "Scene style hint passed to Gemini BCOT prompt generation "
-            "(e.g. 'photorealistic', 'oil painting'). Default: photorealistic."
+            "Scene style hint passed to BCOT prompt generation (OpenAI / internlm; "
+            "same flag name as the former Gemini path). "
+            "E.g. 'photorealistic', 'oil painting'. Default: photorealistic."
         ),
     )
     parser.add_argument(
         "--no_gemini",
         action="store_true",
-        help="Disable Gemini text generation and fall back to the raw WorldScore prompts.",
+        help=(
+            "Disable LLM BCOT prompt enrichment (no internlm/OpenAI calls); "
+            "use raw WorldScore prompts only."
+        ),
     )
     parser.add_argument(
         "--num_between",
@@ -327,9 +355,10 @@ def main() -> None:
 
     _install_bcot_hve_backend(ww)
     _install_sky_bootstrap(ww)
+    _install_layer_prompt_from_current_kf(ww)
 
     if not args.no_gemini:
-        _install_gemini_text_gen(ww, style=args.gemini_style)
+        _install_gemini_text_gen(ww)
 
     dataloader, helper = ww.GetHelpers(
         args.worldscore_model_name,

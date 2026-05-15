@@ -87,12 +87,22 @@ def refine_disp_with_segments_2(disparity, segments, keep_threshold=10, return_r
                 continue
 
         disp_pixels_old = disparity[mask]
-        
+
+        # Drop NaNs before any percentile / std computation.
+        disp_pixels_old = disp_pixels_old[np.isfinite(disp_pixels_old)]
+        if disp_pixels_old.size == 0:
+            continue
+
         # Remove extreme values
         p80 = np.percentile(disp_pixels_old, 80)  # 20 for garden to reserve flag
         p20 = np.percentile(disp_pixels_old, 20)
         valid_px_mask = (disp_pixels_old >= p20) & (disp_pixels_old <= p80)
         valid_disp_px = disp_pixels_old[valid_px_mask]
+
+        # Fall back to all finite pixels when the interquartile band is empty
+        if valid_disp_px.size == 0:
+            valid_disp_px = disp_pixels_old
+
         disp_std = valid_disp_px.std()
 
         # Check if disparity range is too significant to be a valid object

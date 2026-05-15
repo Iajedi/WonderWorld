@@ -20,7 +20,7 @@ from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNor
 from backbone.edit.controller import BCOTHVEPipeline
 from models.models import KeyframeGen, save_point_cloud_as_ply
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
-from util.chatGPT4 import TextpromptGen
+from util.internlm import TextpromptGen
 from util.general_utils import apply_depth_colormap, save_video
 from util.utils import save_depth_map, prepare_scheduler, soft_stitching
 from util.utils import load_example_yaml, convert_pt3d_cam_to_3dgs_cam
@@ -205,8 +205,13 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
             for _ in range(num_between + 1)
         ]
 
-    rotation_path = config['rotation_path'][:config['num_scenes']]
-    assert len(rotation_path) == config['num_scenes']
+    base_rp = list(config['rotation_path'])
+    num_scenes = config['num_scenes']
+    if len(base_rp) >= num_scenes:
+        rotation_path = base_rp[:num_scenes]
+    else:
+        # Cycle through the base rotation_path to fill any extra scenes.
+        rotation_path = [base_rp[i % len(base_rp)] for i in range(num_scenes)]
     
     depth_model = MarigoldPipeline.from_pretrained("prs-eth/marigold-v1-0", torch_dtype=torch.bfloat16).to(config["device"])
     depth_model.scheduler = EulerDiscreteScheduler.from_config(depth_model.scheduler.config)

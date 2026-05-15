@@ -159,7 +159,7 @@ def run(config):
         #     transformer=transformer,
         #     torch_dtype=torch.bfloat16,
         # ).to(device)
-        inpainter_pipeline = BCOTHVEPipeline(offload=False, model="klein", device="cuda:1")
+        inpainter_pipeline = BCOTHVEPipeline(offload=False, model="klein", device=config["bcot_device"])
         edit_pipeline = EditPipeline(base_pipeline=inpainter_pipeline)
     else:
         # Use SD checkpoint
@@ -198,7 +198,7 @@ def run(config):
     kf_gen.image_latest = ToTensor()(start_keyframe).unsqueeze(0).to(config['device'])
     
     if config['gen_sky_image'] or (not os.path.exists(f'examples/sky_images/{example}/sky_0.png') and not os.path.exists(f'examples/sky_images/{example}/sky_1.png')):
-        syncdiffusion_model = SyncDiffusion("cuda:1", sd_version='2.0-inpaint')
+        syncdiffusion_model = SyncDiffusion(config["bcot_device"], sd_version='2.0-inpaint')
     else:
         syncdiffusion_model = None
     sky_mask = kf_gen.generate_sky_mask().float()

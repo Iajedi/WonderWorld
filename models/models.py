@@ -367,7 +367,7 @@ class FrameSyn(torch.nn.Module):
         img, _ = functbl[fill_mode](img, fill_mask_)
 
         # process mask original
-        mask_block_size = 16 if self.use_flux else 8
+        mask_block_size = 4 if self.use_flux else 8
         mask_boundary = mask.shape[0] // 2
         mask_upper = skimage.measure.block_reduce(mask[:mask_boundary, :], (mask_block_size, mask_block_size), mask_strategy)
         mask_upper = mask_upper.repeat(mask_block_size, axis=0).repeat(mask_block_size, axis=1)
@@ -417,21 +417,22 @@ class FrameSyn(torch.nn.Module):
                     "T": int(diffusion_steps),
                     "K": max(1, int(diffusion_steps) // 5),
                     "warm_method": "none" if is_content_inpainting else "ot_harmonic",
+                    "seed": self.config.get("seed"),
                     "omega": 7.0,
                     "alpha_edit": 0.7,
                     "debug": False,
-                    "vae_observed_color_fix": True,
+                    "vae_observed_color_fix": False,
                     "reinject_unknown_expand_px": 4 if is_content_inpainting else 8,
                     "reinject_mask_dilate": 1 if is_content_inpainting else 0,
                     "observed_reinject": True,
                     "lambda_pos": 0.1,
-                    "lambda_bdry": 2.5,
+                    "lambda_bdry": 5.0,
                     "tau": 0.05,
                     "sinkhorn_iters": 100,
                     "lambda_s": 0.2,
                     "connectivity": 8,
-                    "alpha_start": 0.96,
-                    "alpha_end": 0.8,
+                    "alpha_start": 1,
+                    "alpha_end": 0.9,
                     "boundary_band_width": 3,
                     "warm_layers": [
                         ["double", 0],
@@ -442,15 +443,17 @@ class FrameSyn(torch.nn.Module):
                         ["single", 19],
                     ],
                 }
-                bcot_input_image.save("output/flux_debug/bcot_input_image.png")
-                bcot_mask_pil.save("output/flux_debug/bcot_mask_pil.png")
+                output_dir = "output/flux_debug"
+                os.makedirs(output_dir, exist_ok=True)
+                bcot_input_image.save(os.path.join(output_dir, "bcot_input_image.png"))
+                bcot_mask_pil.save(os.path.join(output_dir, "bcot_mask_pil.png"))
                 inpainted_image = self.inpainting_pipeline.run(
                     image=bcot_input_image,
                     mask=bcot_mask_np,
                     prompt_src=prompt_src,
                     prompt_tgt=prompt_tgt,
                     config=bcot_config,
-                    output_dir="output/flux_debug",
+                    output_dir=output_dir,
                     blackout_unknown=not is_content_inpainting,
                 )
             else:
@@ -1116,6 +1119,10 @@ class KeyframeGen(FrameSyn):
         gen_layer_0 = (not os.path.exists(f'./examples/sky_images/{example_name}/sky_0.png')) or gen_sky
         gen_layer_1 = (not os.path.exists(f'./examples/sky_images/{example_name}/sky_1.png')) or gen_layer_0 or gen_sky
         gen_layer_2 = (not os.path.exists(f'./examples/sky_images/{example_name}/sky_2.png')) or gen_layer_1 or gen_sky
+        if not mask.bool().any().item():
+            print("[WARN] No sky pixels found; using the top image band for sky initialization.")
+            mask = mask.clone()
+            mask[..., :128, :] = 1.0
         
         for layer in range(layers_panorama):
             if layer == 0:
@@ -1253,7 +1260,7 @@ class KeyframeGen(FrameSyn):
 
         # Remove points below the ground height
         sky_rows_idx = torch.where(mask.any(dim=1))[0]
-        max_idx = sky_rows_idx.max().item()
+        max_idx = sky_rows_idx.max().item() if sky_rows_idx.numel() > 0 else 127
         ground_threshold = -0.0003 if max_idx <= 255 else -0.003
         mask_above_ground = new_points_3d[:, 1] >= ground_threshold
         new_points_3d = new_points_3d[mask_above_ground]

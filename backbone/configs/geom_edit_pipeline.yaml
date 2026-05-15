@@ -104,7 +104,7 @@ K: 10
 # seam mask to seam + target object so appearance can harmonise with the scene
 # while the earlier seam-only steps keep the pasted structure anchored.
 L: 10
-warm_method: ot_harmonic
+warm_method: none
 
 lambda_pos: 0.1
 lambda_bdry: 1.0

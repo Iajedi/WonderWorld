@@ -155,4 +155,15 @@
   content_prompt: Lake view with Italian houses, idyllic seaside scene with rustic Italian houses perched on the edge of a clear blue lake. trees and rocks near the lake, houses, port in front of houses
   negative_prompt: ""
   background: ""
-
+- name: tokyo
+  image_filepath: examples/images/tokyo.png
+  style_prompt: DSLR 35mm landscape
+  content_prompt: Tokyo Tower, skyscrapers, cityscape, sky
+  negative_prompt: ""
+  background: ""
+- name: worldscore
+  image_filepath: examples/images/027.png
+  style_prompt: DSLR 35mm landscape
+  content_prompt: Indoor kitchen
+  negative_prompt: ""
+  background: ""

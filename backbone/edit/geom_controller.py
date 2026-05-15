@@ -54,6 +54,7 @@ class EditPipeline(BCOTHVEPipeline):
             self.wrapper = base_pipeline.wrapper
             self.model_type = base_pipeline.model_type
             self.device = base_pipeline.device
+            self.offload = base_pipeline.offload
 
     @torch.no_grad()
     def run(

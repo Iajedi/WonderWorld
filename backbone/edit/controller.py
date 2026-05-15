@@ -78,6 +78,7 @@ class BCOTHVEPipeline:
 
     def __init__(self, offload: bool = False, model: str = "klein", device: str = "cuda"):
         self.device = str(device)
+        self.offload = bool(offload)
         if model == "klein":
             try:
                 from ..flux_pipeline import Flux2UniEditFlowPipeline
@@ -100,6 +101,7 @@ class BCOTHVEPipeline:
         ``pipeline.to(pipeline.device)`` after a temporary CPU offload.
         """
         self.wrapper.pipe.to(device)
+        self.wrapper.device = str(device)
         return self
 
     @torch.no_grad()
@@ -137,6 +139,9 @@ class BCOTHVEPipeline:
             warm_layers.append((str(entry[0]), int(entry[1])))
 
         pipe = self.wrapper.pipe  # the raw Flux2KleinPipeline / FluxPipeline
+        if not self.offload:
+            pipe.to(self.device)
+            self.wrapper.device = self.device
 
         # ------------------------------------------------------------------
         # Phase A: setup -- encode, invert, initialise noisy latent

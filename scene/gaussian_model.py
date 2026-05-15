@@ -77,7 +77,10 @@ class GaussianModel:
             self._scaling_prev = torch.cat([previous_gaussian._scaling.detach(), previous_gaussian._scaling_prev], dim=0)
             self._rotation_prev = torch.cat([previous_gaussian._rotation.detach(), previous_gaussian._rotation_prev], dim=0)
             self._opacity_prev = torch.cat([previous_gaussian._opacity.detach(), previous_gaussian._opacity_prev], dim=0)
-            self.filter_3D_prev = torch.cat((previous_gaussian.filter_3D.detach(), previous_gaussian.filter_3D_prev), dim=0)
+            if hasattr(previous_gaussian, 'filter_3D'):
+                self.filter_3D_prev = torch.cat((previous_gaussian.filter_3D.detach(), previous_gaussian.filter_3D_prev), dim=0)
+            else:
+                self.filter_3D_prev = previous_gaussian.filter_3D_prev.clone()
             self.visibility_filter_all = previous_gaussian.visibility_filter_all
             self.is_sky_filter = previous_gaussian.is_sky_filter
             self.delete_mask_all = previous_gaussian.delete_mask_all
@@ -284,7 +287,11 @@ class GaussianModel:
             cos_yz = torch.sum(point_normals_in_screen_yoz * screen_normal_yoz, dim=1)
             # assert torch.all(cos_yz >= 0), "All normals should be in the same direction of the screen normal. Current min value: {}".format(cos_yz.min())
         
-        distance[~valid_points] = distance[valid_points].max()
+        valid_distances = distance[valid_points]
+        if valid_distances.numel() > 0:
+            distance[~valid_points] = valid_distances.max()
+        elif distance.numel() > 0:
+            distance[~valid_points] = distance.max()
         
         #TODO remove hard coded value
         #TODO box to gaussian transform
