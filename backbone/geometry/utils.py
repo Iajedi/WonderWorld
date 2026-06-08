@@ -33,7 +33,7 @@ def build_inpainting_mask(spec: GeometrySpec) -> torch.Tensor:
 
 
 def geometry_mask_to_controller_np(mask: torch.Tensor, size_hw: Tuple[int, int] = (512, 512)) -> np.ndarray:
-    """Float mask ``[1, 1, H, W]`` in ``[0, 1]`` for :class:`~edit.controller.BCOTHVEPipeline`."""
+    """Float mask ``[1, 1, H, W]`` in ``[0, 1]`` for :class:`~edit.controller.BCDMPipeline`."""
     m = mask.detach().float().cpu().numpy()
     while m.ndim > 2:
         m = m.squeeze(0)
@@ -56,7 +56,7 @@ def mask_tensor_to_pil_l(mask: torch.Tensor, size_hw: Tuple[int, int]) -> Image.
 
 
 def inverse_affine_coeffs_for_pil(transform_3x3: torch.Tensor) -> tuple[float, float, float, float, float, float]:
-    """Six coefficients for ``Image.AFFINE`` from a **forward** 3×3 homogeneous matrix.
+    """Six coefficients for ``Image.AFFINE`` from a **forward** 3x3 homogeneous matrix.
 
     ``GeometrySpec.transform_matrix`` maps pixel coordinates in the sense
     ``[x'; y'; 1] = T @ [x; y; 1]`` (column vectors).  Pillow's affine resampling
@@ -124,8 +124,8 @@ def build_boundary_blur_mask(
     """Soft seam mask with *asymmetric* falloff around the foreground boundary.
 
     Weights are high on the paste boundary and drop **quickly** when moving
-    **into** the masked (foreground) region—so the interior is largely
-    preserved—and **slowly** when moving **outward** into the background for a
+    **into** the masked (foreground) region-so the interior is largely
+    preserved-and **slowly** when moving **outward** into the background for a
     gentle taper. A light Gaussian is applied at the end for continuity.
 
     Parameters
@@ -154,9 +154,9 @@ def build_boundary_blur_mask(
     pil_m = mask_tensor_to_pil_l(mask, size_hw)
     M = (np.asarray(pil_m, dtype=np.float32) / 255.0).clip(0.0, 1.0)
     fg = (M > 0.5).astype(np.uint8)
-    # Distance to nearest background (0 in ``fg``) — grows into the interior of the mask.
+    # Distance to nearest background (0 in ``fg``) - grows into the interior of the mask.
     d_in = _edt_to_nearest_zero(fg)
-    # Distance to nearest foreground (0 in ``1-fg``) — grows into the exterior.
+    # Distance to nearest foreground (0 in ``1-fg``) - grows into the exterior.
     d_out = _edt_to_nearest_zero(1 - fg)
 
     s_in = max(float(sigma_inside), 1e-3)

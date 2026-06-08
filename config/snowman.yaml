@@ -1,15 +1,15 @@
-runs_dir: output/flux
+runs_dir: output/snowman
 example_name: snowman
 # city_hall, real_campus_2, venice
 
 
-seed: 216
+seed: 42
 # enable guided depth diffusion
 depth_conditioning: True
 
 # use gpt to generate scene description
-use_gpt: False
-debug: True
+use_gpt: True
+debug: False
 
 # depth model and camera/depth parameters
 depth_model: marigold
@@ -27,7 +27,7 @@ inpainting_resolution_gen: 512
 # re-generate sky panorama images
 gen_sky_image: False
 # generate sky point cloud
-gen_sky: False
+gen_sky: True
 
 # enable layer-wise generation
 gen_layer: True

@@ -1,4 +1,4 @@
-# EditPipeline (edit.geom_controller): inpaint → compose → seam refine
+# EditPipeline (edit.geom_controller): inpaint --> compose --> seam refine
 # Mask files: 1 = unknown / region to change (same convention as inpaint.yaml)
 
 inputs:
@@ -97,14 +97,14 @@ seam_blur_radius: 2.0
 seam_sigma_inside: 1
 seam_sigma_outside: 12.0
 
-# --- BCOTHVE / UniEdit (same knobs as configs/inpaint.yaml) ---
+# --- BCDM / UniEdit (same knobs as configs/inpaint.yaml) ---
 T: 50
 K: 10
 # Geometry second pass only: for the final L active edit steps, expand the
 # seam mask to seam + target object so appearance can harmonise with the scene
 # while the earlier seam-only steps keep the pasted structure anchored.
 L: 10
-warm_method: ot_harmonic
+warm_method: none
 
 lambda_pos: 0.1
 lambda_bdry: 1.0

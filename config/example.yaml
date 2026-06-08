@@ -1,8 +1,8 @@
-runs_dir: output/flux_venice
-example_name: venice
-# city_hall, real_campus_2, venice
+runs_dir: output/main_square
+example_name: main_square
+# city_hall, main_square, venice
 
-seed: 42
+seed: 1
 # enable guided depth diffusion
 depth_conditioning: True
 

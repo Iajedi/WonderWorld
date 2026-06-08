@@ -40,7 +40,7 @@ def _paste_mask_centroid(paste_m: torch.Tensor) -> tuple[float, float]:
 
 
 def _affine_from_compose_entry(entry: Dict[str, Any], paste_m: torch.Tensor) -> torch.Tensor:
-    """3×3 forward map: optional ``matrix``, else ``scale`` + ``dx`` / ``dy``.
+    """3x3 forward map: optional ``matrix``, else ``scale`` + ``dx`` / ``dy``.
 
     Without ``matrix``: uniform ``scale`` (default ``1``) about the **paste_mask**
     foreground centroid, then translation by ``dx`` / ``dy`` (defaults ``0``), same
@@ -49,10 +49,10 @@ def _affine_from_compose_entry(entry: Dict[str, Any], paste_m: torch.Tensor) -> 
     if "matrix" in entry and entry["matrix"] is not None:
         m = entry["matrix"]
         if not isinstance(m, Sequence) or len(m) != 3:
-            raise ValueError("'matrix' must be a 3×3 nested sequence")
+            raise ValueError("'matrix' must be a 3x3 nested sequence")
         t = torch.tensor(m, dtype=torch.float32)
         if t.shape != (3, 3):
-            raise ValueError("'matrix' must be 3×3")
+            raise ValueError("'matrix' must be 3x3")
         return t
 
     s = float(entry["scale"]) if "scale" in entry else 1.0

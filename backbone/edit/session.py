@@ -1,8 +1,8 @@
 """Reusable editing-session primitives.
 
 Extracts Phase A (inversion + packing), Phase C (UniEdit-Flow editing),
-and Phase D (decode) from BCOTHVEPipeline so they can be composed by
-both the original BCOT-HVE controller and the unified geometric pipeline.
+and Phase D (decode) from BCDMPipeline so they can be composed by
+both the original BCDM controller and the unified geometric pipeline.
 """
 
 from __future__ import annotations
@@ -426,7 +426,7 @@ def _edit_with_reinject(
 
 
 # ------------------------------------------------------------------
-# Phase D: decode packed latent → PIL image
+# Phase D: decode packed latent --> PIL image
 # ------------------------------------------------------------------
 
 @torch.no_grad()

@@ -1,4 +1,4 @@
-# BCOT-HVE inpainting configuration
+# BCDM inpainting configuration
 # Mask convention: 1 = unknown (hole), 0 = known (keep)
 
 # Diffusion schedule

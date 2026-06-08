@@ -13,8 +13,8 @@ can switch with one import change, for example:
 * Set ``GOOGLE_API_KEY`` or ``GEMINI_API_KEY`` to a Google AI Studio / Gemini API key.
 * For :meth:`generate_keywords` / :meth:`generate_prompt`, the same spacy model as
   ``chatGPT4`` is used: ``python -m spacy download en_core_web_sm``.
-* BCOT (FLUX) prompts: call :meth:`build_bcot_inpaint_pair_from_conditioning_image` once per inpaint
-  with the conditioning render tensor/PIL — **two** Gemini calls (vision ``prompt_src``, text ``prompt_tgt``).
+* BCDM (FLUX) prompts: call :meth:`build_bcdm_inpaint_pair_from_conditioning_image` once per inpaint
+  with the conditioning render tensor/PIL - **two** Gemini calls (vision ``prompt_src``, text ``prompt_tgt``).
   Scene JSON still uses :meth:`wonder_next_scene` separately when ``use_gpt`` is enabled.
 """
 from __future__ import annotations
@@ -179,7 +179,7 @@ class GeminiTextpromptGen:
         system = (
             "You are an intelligent scene generator. Given a scene and there are 3 most significant common entities. "
             "please generate a brief background prompt about 20 words describing common things in the scene. "
-            "You should not mention the entities in the background prompt. If needed, you can make reasonable guesses. "
+            "You should not mention the blank space, artifacts or entities in the background prompt. If needed, you can make reasonable guesses. "
             "Reply with only the background text, no JSON and no extra commentary."
         )
         g = _require_genai()
@@ -220,13 +220,13 @@ class GeminiTextpromptGen:
             else [output["background"]],
         }
 
-    def _scene_dict_for_bcot(self, scene_dict: dict) -> dict:
-        """Normalize scene_dict for BCOT target elaboration (same keys as wonder_next_scene JSON)."""
+    def _scene_dict_for_bcdm(self, scene_dict: dict) -> dict:
+        """Normalize scene_dict for BCDM target elaboration (same keys as wonder_next_scene JSON)."""
         return _normalize_scene_dict(dict(scene_dict))
 
     def _scene_user_spec_block(self, style: str, d: dict) -> str:
-        """Human-readable block for the target-scene / user-intent side of BCOT."""
-        d = self._scene_dict_for_bcot(d)
+        """Human-readable block for the target-scene / user-intent side of BCDM."""
+        d = self._scene_dict_for_bcdm(d)
         name = d["scene_name"]
         name0 = name[0] if isinstance(name, (list, tuple)) else str(name)
         ent = d["entities"]
@@ -265,34 +265,34 @@ class GeminiTextpromptGen:
                 else:
                     image = image.astype(np.uint8)
             if image.ndim == 2:
-                raise ValueError("Expected HWC RGB array for BCOT conditioning image")
+                raise ValueError("Expected HWC RGB array for BCDM conditioning image")
             return PILImage.fromarray(image).convert("RGB")
         raise TypeError(f"Unsupported conditioning image type: {type(image)}")
 
-    def build_bcot_inpaint_pair_from_conditioning_image(
+    def build_bcdm_inpaint_pair_from_conditioning_image(
         self,
         conditioning_image,
         style: str,
         scene_dict: dict,
     ) -> tuple[str, str]:
-        """BCOT prompts for one inpaint step: exactly **two** Gemini calls.
+        """BCDM prompts for one inpaint step: exactly **two** Gemini calls.
 
-        1. **Vision** — ``prompt_src``: describe foreground and background as visible in the conditioning render.
-        2. **Text** — ``prompt_tgt``: one fluent prompt merging that observation with an elaboration of the target
+        1. **Vision** - ``prompt_src``: describe foreground and background as visible in the conditioning render.
+        2. **Text** - ``prompt_tgt``: one fluent prompt in 1-2 sentences merging that observation with an elaboration of the target
            scene (``scene_dict``: scene name, entities, background) and ``style``.
 
         On failure, falls back to a heuristic ``prompt_src`` and :meth:`generate_prompt`-style ``prompt_tgt``.
         """
         _require_genai()
         pil = self._conditioning_image_to_pil(conditioning_image)
-        d = self._scene_dict_for_bcot(scene_dict)
+        d = self._scene_dict_for_bcdm(scene_dict)
         user_spec = self._scene_user_spec_block(style, d)
 
         # --- Call 1 (vision): prompt_src ---
         system_src = (
-            "You describe images for inpainting conditioning. Clearly separate **foreground** (main subjects, "
-            "nearby objects, terrain, structures in front) and **background** (sky, horizon, distant scenery). "
-            "Only state what is visibly present; do not invent occluded content. "
+            "You describe images for inpainting conditioning. Clearly separate foreground (main subjects, nearby "
+            "objects, terrain, structures in front) and background (sky, horizon, distant scenery). "
+            "Only state what is visibly present; do not mention blank space, artifacts or invent occluded content. "
             "Reply with plain prose only, 1 - 2 short sentences, no JSON or bullet labels."
         )
         g = _require_genai()
@@ -302,17 +302,17 @@ class GeminiTextpromptGen:
             try:
                 r = model_src.generate_content(
                     [
-                        "Describe the foreground and the background of this image as they would appear to someone "
-                        "editing or inpainting this frame.",
+                        "Describe the foreground and background of this frame for an inpainting editor. "
+                        "STRICTLY at most 2 sentences, concise and precise, preserving only essential visible details.",
                         pil,
                     ]
                 )
                 prompt_src = (r.text or "").strip()
                 if prompt_src:
-                    print("PROMPT TEXT (BCOT prompt_src, vision): ", prompt_src)
+                    print("PROMPT TEXT (BCDM prompt_src, vision): ", prompt_src)
                     break
             except Exception as e:  # noqa: BLE001
-                print(f"Gemini BCOT prompt_src (vision) retry: {e}")
+                print(f"Gemini BCDM prompt_src (vision) retry: {e}")
                 time.sleep(0.5)
         if not prompt_src:
             prompt_src = (
@@ -325,13 +325,15 @@ class GeminiTextpromptGen:
             "You write one English text-to-image prompt for boundary-conditioned inpainting. "
             "You are given (A) an accurate description of what is already visible in the frame and (B) a target "
             "scene specification (style, scene name, entities, background). "
-            "Produce a single fluent paragraph that: keeps (A) as the anchor for observed regions; elaborates (B) "
-            "so newly generated / inpainted areas match the intended scene; does not contradict (A). "
+            "Produce 1-2 fluent sentences that: summarizes (A) and elaborates (B) "
+            "by describing the spatial placement of objects in (B) relative to (A). "
             "Output only the final prompt, no title or preamble."
         )
         user_tgt = (
             f"{user_spec}\n"
-            f"--- What is already visible in the frame (do not contradict this) ---\n{prompt_src}\n"
+            f"--- Source frame description (A) - must remain consistent for a seamless transition ---\n{prompt_src}\n"
+            "Write the inpainting prompt that smoothly continues (A) into the target scene (B). "
+            "STRICTLY at most 2 sentences, concise and precise, preserving essential details.\n"
         )
         model_tgt = g.GenerativeModel(self.model, system_instruction=system_tgt)
         prompt_tgt = ""
@@ -340,10 +342,10 @@ class GeminiTextpromptGen:
                 r = model_tgt.generate_content(user_tgt)
                 prompt_tgt = (r.text or "").strip()
                 if prompt_tgt:
-                    print("PROMPT TEXT (BCOT prompt_tgt, text): ", prompt_tgt)
+                    print("PROMPT TEXT (BCDM prompt_tgt, text): ", prompt_tgt)
                     break
             except Exception as e:  # noqa: BLE001
-                print(f"Gemini BCOT prompt_tgt retry: {e}")
+                print(f"Gemini BCDM prompt_tgt retry: {e}")
                 time.sleep(0.5)
         if not prompt_tgt:
             sn = d["scene_name"]
@@ -361,13 +363,16 @@ class GeminiTextpromptGen:
 
         system = (
             "You describe images for object-removal inpainting. The image may contain a black blanked area where "
-            "an object or region was removed. Describe only the visible content outside that blanked area, including "
-            "scene layout, materials, lighting, background, and nearby context. Do not describe or guess the removed "
-            "object. Output one detailed paragraph, no title or bullets."
+            "an object or region was removed. Describe only the visible content outside that blanked area "
+            "(scene layout, materials, lighting, background, nearby context) so the follow-up inpaint can produce a "
+            "seamless transition into the removed region. Do not describe or guess the removed object. "
+            "STRICTLY at most 2 sentences, as concise and precise as possible, preserving only essential visible "
+            "details. No title, no bullets, no preamble."
         )
         prompt = (
-            "Describe the image content outside the blanked/removed region. Exclude the missing region and do not "
-            "invent what was there."
+            "Describe the image content outside the blanked/removed region so a follow-up model can inpaint it "
+            "seamlessly. Exclude the missing region and do not invent what was there. "
+            "STRICTLY at most 2 concise, precise sentences with essential details only."
         )
         fallback = (
             "A detailed scene with the visible regions preserved around a blanked edit area; describe the background, "

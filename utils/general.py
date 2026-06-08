@@ -131,6 +131,15 @@ def normal2rotation(n):
     return q
 
 def rotation2normal(q):
+    # Re-normalise to guard against numerically near-zero quaternions that
+    # can arise when very few Gaussians survive floater filtering.
+    q = torch.nn.functional.normalize(q, dim=-1)
+    # Any quaternion that was exactly zero (norm==0) after normalisation
+    # remains zero; replace with the identity quaternion [1,0,0,0].
+    zero_mask = q.norm(dim=-1) == 0
+    if zero_mask.any():
+        q = q.clone()
+        q[zero_mask] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=q.device, dtype=q.dtype)
     R = quaternion2rotmat(q)
     normal = R[:, :, 2]
     return normal

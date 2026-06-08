@@ -1,4 +1,4 @@
-# BCOT-HVE outpainting configuration
+# BCDM outpainting configuration
 # Mask convention: 1 = unknown (extended region), 0 = known (original)
 
 # Diffusion schedule

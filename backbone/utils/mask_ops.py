@@ -1,4 +1,4 @@
-"""Mask utilities for BCOT-HVE warm-start inpainting/outpainting.
+"""Mask utilities for BCDM warm-start inpainting/outpainting.
 
 Provides helpers to convert masks between pixel, latent, and token space,
 extract boundary bands, build neighbour graphs, and construct 2-D coordinate
@@ -162,7 +162,7 @@ def mask_2d_from_token_mask(
     mask_token: torch.Tensor,
     token_hw: Tuple[int, int],
 ) -> torch.Tensor:
-    """Reshape a flat ``[…, N, 1]`` or ``[N]`` token mask to ``[H, W]``."""
+    """Reshape a flat ``[..., N, 1]`` or ``[N]`` token mask to ``[H, W]``."""
     m = mask_token.detach().float()
     if m.ndim >= 3:
         m = m[0, :, 0]

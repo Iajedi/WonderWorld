@@ -83,7 +83,7 @@ class Flux2StableFlowPipeline:
         self.device = str(device)
         self.pipe = Flux2KleinPipeline.from_pretrained("black-forest-labs/FLUX.2-klein-base-4B", torch_dtype=dtype)
         if offload:
-            self.pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
+            self.pipe.enable_model_cpu_offload(device=self.device)  # save VRAM; execute on the configured GPU
         else:
             self.pipe.to(self.device)
 
@@ -102,7 +102,10 @@ class Flux2StableFlowPipeline:
 
     @torch.no_grad()
     def image2latent(self, image, latent_nudging_scalar = 1.0):
-        image = self.pipe.image_processor.preprocess(image).type(self.pipe.vae.dtype).to(self.device)
+        if not hasattr(self.pipe.vae, "_hf_hook"):
+            self.pipe.vae.to(self.device)
+        vae_device = getattr(self.pipe, "_offload_device", next(self.pipe.vae.parameters()).device)
+        image = self.pipe.image_processor.preprocess(image).type(self.pipe.vae.dtype).to(vae_device)
         latents = self.pipe._encode_vae_image(image, generator=None)
         latents = latents * latent_nudging_scalar
 
@@ -163,14 +166,17 @@ class Flux2UniEditFlowPipeline:
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.pipe.scheduler.config)
 
         if offload:
-            self.pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
+            self.pipe.enable_model_cpu_offload(device=self.device)  # save VRAM; execute on the configured GPU
         else:
             self.pipe.to(self.device)
 
     @torch.no_grad()
     def image2latent(self, image, latent_nudging_scalar=1.0):
         '''image: PIL.Image'''
-        image = self.pipe.image_processor.preprocess(image).type(dtype).to(self.device)
+        if not hasattr(self.pipe.vae, "_hf_hook"):
+            self.pipe.vae.to(self.device)
+        vae_device = getattr(self.pipe, "_offload_device", next(self.pipe.vae.parameters()).device)
+        image = self.pipe.image_processor.preprocess(image).type(dtype).to(vae_device)
         latents = self.pipe._encode_vae_image(image, generator=None)
         latent_ids = self.pipe._prepare_latent_ids(latents)
         return latents * latent_nudging_scalar, latent_ids
@@ -306,14 +312,17 @@ class FluxUniEditFlowPipeline:
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.pipe.scheduler.config)
 
         if offload:
-            self.pipe.enable_model_cpu_offload()  # save some VRAM by offloading the model to CPU
+            self.pipe.enable_model_cpu_offload(device=self.device)  # save VRAM; execute on the configured GPU
         else:
             self.pipe.to(self.device)
 
     @torch.no_grad()
     def image2latent(self, image, latent_nudging_scalar=1.0):
         '''image: PIL.Image'''
-        image = self.pipe.image_processor.preprocess(image).type(dtype).to(self.device)
+        if not hasattr(self.pipe.vae, "_hf_hook"):
+            self.pipe.vae.to(self.device)
+        vae_device = getattr(self.pipe, "_offload_device", next(self.pipe.vae.parameters()).device)
+        image = self.pipe.image_processor.preprocess(image).type(dtype).to(vae_device)
         latents = self.pipe._encode_vae_image(image, generator=None)
         latent_ids = self.pipe._prepare_latent_ids(latents)
         return latents * latent_nudging_scalar, latent_ids

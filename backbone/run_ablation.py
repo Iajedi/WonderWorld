@@ -18,7 +18,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from backbone.edit.controller import BCOTHVEPipeline
+from backbone.edit.controller import BCDMPipeline
 from backbone.viz.debug_transport import save_comparison_grid
 
 
@@ -32,7 +32,7 @@ WARM_METHODS = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BCOT-HVE ablation over warm-start methods")
+    parser = argparse.ArgumentParser(description="BCDM ablation over warm-start methods")
     parser.add_argument("--config", type=str, default="configs/inpaint.yaml")
     parser.add_argument("--image", type=str, default="inputs/klein_snowman_scaled.png")
     parser.add_argument("--mask", type=str, default="inputs/klein_25p_blur.png")
@@ -73,7 +73,7 @@ def main() -> None:
     mask_img = Image.open(args.mask).convert("L").resize((512, 512))
     mask_np = (np.array(mask_img) / 255.0).astype(np.float32).reshape(1, 1, 512, 512)
 
-    pipe = BCOTHVEPipeline(offload=args.offload, device=args.device)
+    pipe = BCDMPipeline(offload=args.offload, device=args.device)
 
     results: dict[str, Image.Image] = {}
     all_metrics: dict[str, dict] = {}

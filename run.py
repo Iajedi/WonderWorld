@@ -17,10 +17,10 @@ from torchvision.transforms import ToPILImage, ToTensor
 from tqdm import tqdm
 from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler
 
-# TEST FLUX
+# Integration of our method
 from diffusers import FluxFillPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
 from diffusers import Flux2KleinPipeline
-from backbone.edit.controller import BCOTHVEPipeline
+from backbone.edit.controller import BCDMPipeline
 from backbone.edit.geom_controller import EditPipeline
 from backbone.edit.socket_edit import (
     EditPayloadError,
@@ -34,9 +34,10 @@ from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
 from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNormal, MarigoldNormalsPipeline
 
-from models.models import KeyframeGen, save_point_cloud_as_ply, BCOT_MASK_GAUSSIAN_BLUR_RADIUS
+from models.models import KeyframeGen, save_point_cloud_as_ply, BCDM_MASK_GAUSSIAN_BLUR_RADIUS
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
 # from util.chatGPT4 import TextpromptGen
+# from util.internlm import TextpromptGen
 from util.gemini_prompt_gen import GeminiTextpromptGen as TextpromptGen, GeminiTextpromptGen
 from util.general_utils import apply_depth_colormap, save_video
 from util.utils import save_depth_map, prepare_scheduler, soft_stitching
@@ -159,7 +160,7 @@ def run(config):
         #     transformer=transformer,
         #     torch_dtype=torch.bfloat16,
         # ).to(device)
-        inpainter_pipeline = BCOTHVEPipeline(offload=False, model="klein", device="cuda:1")
+        inpainter_pipeline = BCDMPipeline(offload=False, model="klein", device=config["bcdm_device"])
         edit_pipeline = EditPipeline(base_pipeline=inpainter_pipeline)
     else:
         # Use SD checkpoint
@@ -198,18 +199,18 @@ def run(config):
     kf_gen.image_latest = ToTensor()(start_keyframe).unsqueeze(0).to(config['device'])
     
     if config['gen_sky_image'] or (not os.path.exists(f'examples/sky_images/{example}/sky_0.png') and not os.path.exists(f'examples/sky_images/{example}/sky_1.png')):
-        syncdiffusion_model = SyncDiffusion("cuda:1", sd_version='2.0-inpaint')
+        syncdiffusion_model = SyncDiffusion(config["bcdm_device"], sd_version='2.0-inpaint')
     else:
         syncdiffusion_model = None
     sky_mask = kf_gen.generate_sky_mask().float()
 
     # Free cuda:1 while SyncDiffusion generates all sky images, then restore.
-    # inpainter_pipeline (BCOTHVEPipeline) and edit_pipeline share the same
+    # inpainter_pipeline (BCDMPipeline) and edit_pipeline share the same
     # underlying wrapper, so moving one moves both.  For the SD case the
     # inpainter lives on a different GPU (config["device"]) so offloading it
     # is a no-op cost-wise but still safe.
     _inpainter_home_device = (
-        inpainter_pipeline.device          # BCOTHVEPipeline: stored str, never changes
+        inpainter_pipeline.device          # BCDMPipeline: stored str, never changes
         if config["use_flux"]
         else str(inpainter_pipeline.device)  # HF pipeline: reflect before offload
     ) if syncdiffusion_model is not None else None
@@ -438,10 +439,10 @@ def run(config):
             outpaint_mask = inpaint_mask_0p0_nosky * mask_using_nosky_render + inpaint_mask_0p0 * mask_using_full_render
             outpaint_mask = dilation(outpaint_mask, kernel=torch.ones(7, 7).cuda())
 
-        # Widen the region for adding Gaussians under FLUX/BCOT: matches BCOT mask blur edge (PIL) in
-        # models.models.BCOT_MASK_GAUSSIAN_BLUR_RADIUS and KeyframeGen.inpaint.
+        # Widen the region for adding Gaussians under FLUX/BCDM: matches BCDM mask blur edge (PIL) in
+        # models.models.BCDM_MASK_GAUSSIAN_BLUR_RADIUS and KeyframeGen.inpaint.
         if config["use_flux"]:
-            k = 5 * int(np.ceil(BCOT_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
+            k = 5 * int(np.ceil(BCDM_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
             k = min(k, 31)
             outpaint_mask_for_new_points = (dilation(
                 outpaint_mask.float(), kernel=torch.ones(k, k, device=config["device"])
@@ -449,14 +450,18 @@ def run(config):
         else:
             outpaint_mask_for_new_points = outpaint_mask
         
-        bcot_src, bcot_tgt = None, None
+        bcdm_src, bcdm_tgt = "", ""
         if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"]:
-            bcot_src, bcot_tgt = pt_gen.build_bcot_inpaint_pair_from_conditioning_image(
+            bcdm_src, bcdm_tgt = pt_gen.build_bcdm_inpaint_pair_from_conditioning_image(
                 outpaint_condition_image, style_prompt, scene_dict
             )
 
         # Content inpainting
-        inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50, bcot_prompt_src=bcot_src, bcot_prompt_tgt=bcot_tgt)
+        # Measure time for inpainting
+        time_start = time.time()
+        inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50, bcdm_prompt_src=bcdm_src, bcdm_prompt_tgt=bcdm_tgt)
+        time_end = time.time()
+        print(f"Inpainting time: {time_end - time_start} seconds")
 
         # TODO: Prune edited regions (mask union of all edited regions)
         # TODO: Edit output (equivalent to inpainting entire image)
@@ -482,14 +487,23 @@ def run(config):
 
         kf_gen.image_latest = recomposed
         if config['gen_layer']:
+            # Measure time for layer generation
+            time_start = time.time()
             kf_gen.generate_layer(pred_semantic_map=sem_seg, scene_name=scene_name)
+            time_end = time.time()
+            print(f"Layer generation time: {time_end - time_start} seconds")
 
             depth_should_be = kf_gen.depth_latest_init
             mask_to_align_depth = ~(kf_gen.mask_disocclusion.bool()) & (depth_should_be < 0.006 * 0.8)
             mask_to_farther_depth = kf_gen.mask_disocclusion.bool() & (depth_should_be < 0.006 * 0.8)
+            # Measure time for depth generation
+            time_start = time.time()
             with torch.no_grad():
                 kf_gen.depth, kf_gen.disparity = kf_gen.get_depth(kf_gen.image_latest, archive_output=True, target_depth=depth_should_be, mask_align=mask_to_align_depth, mask_farther=mask_to_farther_depth,
                                                                   diffusion_steps=30, guidance_steps=8)
+            time_end = time.time()
+            print(f"Depth generation time: {time_end - time_start} seconds")
+
             kf_gen.refine_disp_with_segments(no_refine_mask=ground_mask.squeeze().cpu().numpy(),
                                              existing_mask=~(kf_gen.mask_disocclusion).bool().squeeze().cpu().numpy(),
                                              existing_disp=kf_gen.disparity_latest_init.squeeze().cpu().numpy())
@@ -505,13 +519,19 @@ def run(config):
             kf_gen.update_current_pc_by_kf(image=kf_gen.image_latest, depth=kf_gen.depth_latest, valid_mask=valid_px_mask)
         kf_gen.archive_latest()
 
+        gaussian_training_time = 0
         if config['gen_layer']:
             traindata, traindata_layer = kf_gen.convert_to_3dgs_traindata_latest_layer(xyz_scale=xyz_scale)
             gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
             scene = Scene(traindata_layer, gaussians, opt)
             dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
             save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene_layer{i+1:02d}"
+
+            # Measure time for training
+            time_start = time.time()
             train_gaussian(gaussians, scene, opt, save_dir)  # Base layer training
+            time_end = time.time()
+            gaussian_training_time += time_end - time_start
         else:
             traindata = kf_gen.convert_to_3dgs_traindata_latest(xyz_scale=xyz_scale, use_no_loss_mask=False)
 
@@ -541,8 +561,14 @@ def run(config):
         scene = Scene(traindata, gaussians, opt)
         dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
         save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene{i+1:02d}"
+
+        # Measure time for training
+        time_start = time.time()
         train_gaussian(gaussians, scene, opt, save_dir)
-        
+        time_end = time.time()
+        gaussian_training_time += time_end - time_start
+
+        print(f"Gaussian training time: {gaussian_training_time} seconds")
         gaussians.set_inscreen_points_to_visible(tdgs_cam)
 
         kf_gen.increment_kf_idx()
@@ -653,7 +679,7 @@ def _process_edit_submit(data, room):
 
     try:
         if edit_pipeline is None:
-            raise RuntimeError("Edit geometry requires config['use_flux'] so the BCOTHVE/FLUX pipeline is available.")
+            raise RuntimeError("Edit geometry requires config['use_flux'] so the BCDM/FLUX pipeline is available.")
         if pt_gen is None:
             raise RuntimeError("Gemini prompt generator is not ready yet.")
         if runtime_config is None or edit_pipeline_config is None:
@@ -737,7 +763,7 @@ def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_descr
     edit_mask = torch.maximum(source_region, decoded.target_mask_tensor).unsqueeze(0).to(device)
     edit_mask_float = edit_mask.float()
     if config["use_flux"]:
-        k = 5 * int(np.ceil(BCOT_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
+        k = 5 * int(np.ceil(BCDM_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
         k = min(k, 31)
         dilated_edit_mask = (dilation(edit_mask_float, kernel=torch.ones(k, k, device=device)) > 0.5).to(edit_mask_float.dtype)
     else:

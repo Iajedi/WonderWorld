@@ -1,4 +1,4 @@
-"""BCOTHVEPipeline -- orchestrator for BCOT-HVE inpainting / outpainting.
+"""BCDMPipeline -- orchestrator for BCDM inpainting / outpainting.
 
 Wraps the existing Flux2UniEditFlowPipeline (or FluxUniEditFlowPipeline)
 and inserts a K-step warm-start phase before the standard UniEdit-Flow
@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+import time
 from PIL import Image
 
 try:
@@ -63,8 +64,8 @@ def _compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     return float(a * num_steps + b)
 
 
-class BCOTHVEPipeline:
-    """End-to-end BCOT-HVE inpainting / outpainting controller.
+class BCDMPipeline:
+    """End-to-end BCDM inpainting / outpainting controller.
 
     Parameters
     ----------
@@ -76,8 +77,9 @@ class BCOTHVEPipeline:
         Torch device for model execution, e.g. ``"cuda"`` or ``"cuda:1"``.
     """
 
-    def __init__(self, offload: bool = False, model: str = "klein", device: str = "cuda"):
+    def __init__(self, offload: bool = False, model: str = "klein", device: str = "cuda", seed: int = 1):
         self.device = str(device)
+        self.offload = bool(offload)
         if model == "klein":
             try:
                 from ..flux_pipeline import Flux2UniEditFlowPipeline
@@ -91,8 +93,11 @@ class BCOTHVEPipeline:
                 from backbone.flux_pipeline import FluxUniEditFlowPipeline
             self.wrapper = FluxUniEditFlowPipeline(offload=offload, device=self.device)
         self.model_type = model
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
 
-    def to(self, device: str) -> "BCOTHVEPipeline":
+    def to(self, device: str) -> "BCDMPipeline":
         """Move the underlying model weights to *device*.
 
         ``self.device`` (the configured home device) is intentionally left
@@ -100,6 +105,7 @@ class BCOTHVEPipeline:
         ``pipeline.to(pipeline.device)`` after a temporary CPU offload.
         """
         self.wrapper.pipe.to(device)
+        self.wrapper.device = str(device)
         return self
 
     @torch.no_grad()
@@ -115,7 +121,7 @@ class BCOTHVEPipeline:
         late_edit_mask: Optional[Union[str, np.ndarray, torch.Tensor]] = None,
         late_edit_steps: int = 0,
     ) -> Image.Image:
-        """Execute the full four-phase BCOT-HVE pipeline.
+        """Execute the full four-phase BCDM pipeline.
 
         Returns the final decoded PIL image.
         """
@@ -137,6 +143,9 @@ class BCOTHVEPipeline:
             warm_layers.append((str(entry[0]), int(entry[1])))
 
         pipe = self.wrapper.pipe  # the raw Flux2KleinPipeline / FluxPipeline
+        if not self.offload:
+            pipe.to(self.device)
+            self.wrapper.device = self.device
 
         # ------------------------------------------------------------------
         # Phase A: setup -- encode, invert, initialise noisy latent
@@ -169,6 +178,7 @@ class BCOTHVEPipeline:
 
         self.wrapper.invert_scheduler.set_hyperparameters(alpha=1.0)
         pipe.scheduler = self.wrapper.invert_scheduler
+        time_start = time.time()
         invert_noise_latent = pipe(
             prompt="",
             num_inference_steps=T,
@@ -180,7 +190,9 @@ class BCOTHVEPipeline:
             callback_on_step_end=_inv_callback if observed_reinject else None,
             callback_on_step_end_tensor_inputs=["latents"],
         ).images
-
+        time_end = time.time()
+        print(f"BCDM Inversion time: {time_end - time_start} seconds")
+        
         if self.model_type == "klein":
             invert_noise_latent = self.wrapper._patchify_and_bn_normalize(invert_noise_latent)
         else:
@@ -222,6 +234,7 @@ class BCOTHVEPipeline:
             )
 
         # Replace unknown region with Gaussian noise
+        # if not (blackout_unknown and warm_method == "none"):
         eps = torch.randn_like(z_packed[:1])  # [1, N, C]
         m = mask_token  # [1, N, 1]
         z_packed = (1.0 - m) * z_packed + m * torch.cat([eps, eps], dim=0)
@@ -234,13 +247,16 @@ class BCOTHVEPipeline:
         # ------------------------------------------------------------------
         if K > 0 and warm_method != "none":
             # Encode prompts
+            time_start = time.time()
             prompt_embeds, text_ids = pipe.encode_prompt(
                 prompt=[prompt_src, prompt_tgt],
                 device=z_packed.device,
                 num_images_per_prompt=1,
                 max_sequence_length=512,
             )
-
+            time_end = time.time()
+            print(f"BCDM Prompt encode time: {time_end - time_start} seconds")
+            
             # Prepare latent IDs from the 4-D latent
             latent_image_ids = pipe._prepare_latent_ids(edit_init_latent).to(z_packed.device)
 
@@ -256,6 +272,7 @@ class BCOTHVEPipeline:
             config_with_hw = {**config, "token_hw": token_hw}
             debug_warmdir = os.path.join(output_dir, "warm_debug") if (debug and output_dir is not None) else None
 
+            time_start = time.time()
             z_packed = warm_start_loop(
                 pipe=pipe,
                 z_t=z_packed,
@@ -269,7 +286,9 @@ class BCOTHVEPipeline:
                 warm_method=warm_method,
                 debug_dir=debug_warmdir,
             )
-
+            time_end = time.time()
+            print(f"BCDM Warm start time: {time_end - time_start} seconds")
+            
         if debug and output_dir is not None:
             torch.save(z_packed.cpu(), os.path.join(output_dir, "z_after_warmstart.pt"))
 
@@ -279,6 +298,8 @@ class BCOTHVEPipeline:
         #   black-box pipe() call so we can inject inversion-trajectory
         #   tokens into the observed region before each velocity prediction.
         # ------------------------------------------------------------------
+        
+        time_start = time.time()
         if observed_reinject:
             result_image = self._edit_with_reinject(
                 pipe=pipe,
@@ -323,6 +344,8 @@ class BCOTHVEPipeline:
                 late_mask_np=late_mask_np,
                 late_edit_steps=late_edit_steps,
             )
+        time_end = time.time()
+        print(f"BCDM Edit time: {time_end - time_start} seconds")
 
         # ------------------------------------------------------------------
         # Phase D: save outputs
@@ -629,7 +652,7 @@ class BCOTHVEPipeline:
             if use_late_reinject_mask and j >= num_edit_steps - late_steps:
                 step_mask = late_reinject_mask_token
 
-            # Index into inv_trajectory: map edit step j → inversion step
+            # Index into inv_trajectory: map edit step j --> inversion step
             reinject_idx = T - K - j
             reinject_idx = max(0, min(reinject_idx, len(inv_trajectory) - 1))
             z_inv = inv_trajectory[reinject_idx]  # [1, N, C]
@@ -824,4 +847,4 @@ class BCOTHVEPipeline:
             with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
                 for k, v in metrics.items():
                     f.write(f"{k}: {v:.6f}\n")
-            print(f"[BCOT-HVE] Metrics: {metrics}")
+            print(f"[BCDM] Metrics: {metrics}")
