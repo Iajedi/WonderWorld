@@ -6,21 +6,21 @@ T: 50               # total denoising steps
 K: 10               # warm-start steps
 
 # Warm-start method: none | kv_replace | masked_attention | ot_only | ot_harmonic
-warm_method: ot_harmonic
+warm_method: none
 
 # Optimal transport
 lambda_pos: 0.1      # positional distance weight in cost matrix
-lambda_bdry: 1.0     # boundary-distance penalty weight
+lambda_bdry: 5.0     # boundary-distance penalty weight
 tau: 0.05            # Sinkhorn entropy regularisation
 sinkhorn_iters: 100  # Sinkhorn iterations
 
 # Harmonic extension
-lambda_s: 0.5        # screening strength (data fidelity vs smoothness)
+lambda_s: 0.2        # screening strength (data fidelity vs smoothness)
 connectivity: 8      # grid adjacency for Laplacian (4 or 8)
 
 # Alpha schedule (blending transported vs target velocity)
-alpha_start: 0.96     # first warm step: heavily favour transported
-alpha_end: 0.6        # last warm step: shift toward target
+alpha_start: 0.95     # first warm step: heavily favour transported
+alpha_end: 0.8        # last warm step: shift toward target
 
 # Boundary band
 boundary_band_width: 3   # known-side band width for boundary penalty
@@ -35,8 +35,8 @@ warm_layers:
   - [single, 19]
 
 # UniEdit-Flow editing phase
-omega: 4.0           # guidance correction strength
-alpha_edit: 0.4      # schedule truncation for edit phase (1.0 = full)
+omega: 7.0           # guidance correction strength
+alpha_edit: 0.7      # schedule truncation for edit phase (1.0 = full)
 
 # Observed-region reinjection
 observed_reinject: true   # anchor observed region to inversion trajectory every step
@@ -46,6 +46,8 @@ observed_reinject: true   # anchor observed region to inversion trajectory every
 reinject_unknown_expand_px: 12
 # Optional extra dilation on the token grid after the above (0 = off).
 reinject_mask_dilate: 3
+
+blackout_unknown: false
 
 # VAE decode: per-channel affine (scale + shift) fit on observed pixels vs reference
 vae_observed_color_fix: true
