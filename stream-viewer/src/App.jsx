@@ -33,7 +33,7 @@ function centerForegroundTransform(w, h) {
   return `translate(${tx}px, ${ty}px) rotate(0deg) scale(1, 1)`;
 }
 
-/** Kept inside the 512×512 main stack (Moveable `bounds`). */
+/** Kept inside the 512x512 main stack (Moveable `bounds`). */
 const MAIN_CANVAS_MOVEABLE_BOUNDS = {
   left: 0,
   top: 0,
@@ -657,7 +657,7 @@ export default function App() {
                   disabled={submitBusy}
                   onClick={handleSubmit}
                 >
-                  {submitBusy ? 'Saving…' : 'Submit'}
+                  {submitBusy ? 'Saving...' : 'Submit'}
                 </button>
               </div>
             </div>

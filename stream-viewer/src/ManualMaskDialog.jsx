@@ -128,7 +128,7 @@ export function ManualMaskDialog({ open, imageUrl, title = 'Manual mask', onClos
             {title}
           </h2>
           <button type="button" className="manual-mask-close-icon" onClick={onClose} aria-label="Close dialog">
-            ×
+            x
           </button>
         </header>
         <div className="manual-mask-tools">

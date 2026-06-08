@@ -35,7 +35,7 @@ export function loadImageUrl(url) {
   });
 }
 
-/** Solid black 512x512 PNG data URL — used as fallback mask when none is set. */
+/** Solid black 512x512 PNG data URL - used as fallback mask when none is set. */
 export function blackMask512DataUrl() {
   const c = document.createElement('canvas');
   c.width = SIZE;
@@ -131,7 +131,7 @@ export async function urlToContained512DataUrl(url, fillStyle = '#ffffff') {
   return canvasToPngDataUrl(c);
 }
 
-/** Main overlay (colored) → strict B&W PNG, white = painted region, black = background. */
+/** Main overlay (colored) --> strict B&W PNG, white = painted region, black = background. */
 export function mainMaskOverlayToBwOpaquePngDataUrl(overlayCanvas) {
   const c = document.createElement('canvas');
   c.width = SIZE;
@@ -162,7 +162,7 @@ export function mainMaskOverlayToBwOpaquePngDataUrl(overlayCanvas) {
   return canvasToPngDataUrl(c);
 }
 
-/** Foreground (target) with mask matte + transform, on 512×512 transparent background. */
+/** Foreground (target) with mask matte + transform, on 512x512 transparent background. */
 export async function renderForegroundOverlay512(foregroundEl, fgW, fgH, targetImgUrl, maskUrl) {
   const out = document.createElement('canvas');
   out.width = SIZE;
@@ -280,7 +280,7 @@ export async function renderTransformedTargetMaskBw512(foregroundEl, fgW, fgH, m
 }
 
 // ---------------------------------------------------------------------------
-// Canonical image assembly — returns {source_image, source_mask, target_image, target_mask}
+// Canonical image assembly - returns {source_image, source_mask, target_image, target_mask}
 // all as PNG data URL strings, suitable for direct emit over Socket.IO.
 // ---------------------------------------------------------------------------
 

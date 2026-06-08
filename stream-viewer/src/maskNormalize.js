@@ -13,7 +13,7 @@ function loadImage(url) {
   });
 }
 
-/** In-place. Selection → #fff opaque; off → transparent (for destination-in / CSS luminance). */
+/** In-place. Selection --> #fff opaque; off --> transparent (for destination-in / CSS luminance). */
 export function imageDataToCompositeMatte(data) {
   for (let i = 0; i < data.length; i += 4) {
     const a = data[i + 3];
@@ -35,7 +35,7 @@ export function imageDataToCompositeMatte(data) {
   }
 }
 
-/** In-place. Selection → #fff; off → #000; all alpha 255 (export / viz). */
+/** In-place. Selection --> #fff; off --> #000; all alpha 255 (export / viz). */
 export function imageDataToOpaqueBW(data) {
   for (let i = 0; i < data.length; i += 4) {
     const a = data[i + 3];
