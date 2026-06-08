@@ -1,37 +1,44 @@
 #!/usr/bin/env python
-"""Run a single BCOT-HVE inpainting example end-to-end.
+"""Run a single BCDM inpainting example end-to-end.
 
 Usage
 -----
-    cd backbone
-    python run_inpaint.py [--config configs/inpaint.yaml] [--outdir outputs/bcot_hve_inpaint]
+    cd /path/to/wonderworld
+    python backbone/run_inpaint.py [--config backbone/configs/inpaint.yaml] [--outdir backbone/outputs/bcdm_hve_inpaint]
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+
 import yaml
 from PIL import Image
 
-from backbone.edit.controller import BCOTHVEPipeline
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from backbone.edit.controller import BCDMPipeline
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BCOT-HVE single inpainting run")
+    parser = argparse.ArgumentParser(description="BCDM single inpainting run")
     parser.add_argument("--config", type=str, default="configs/inpaint.yaml")
-    parser.add_argument("--image", type=str, default="inputs/klein_snowman_scaled.png")
-    parser.add_argument("--mask", type=str, default="inputs/klein_25p_blur.png")
+    parser.add_argument("--image", type=str, default="backbone/inputs/imperial_scaled.jpg")
+    parser.add_argument("--mask", type=str, default="backbone/inputs/klein_25p_blur.png")
     parser.add_argument(
         "--prompt_src",
         type=str,
-        default="Snowman holding a sign that reads 'holl world' along a coastal promenade with pineapples"
+        default="A photo of a red brick building"
     )
     parser.add_argument(
         "--prompt_tgt",
         type=str,
-        default="Snowman holding a sign that reads 'holl world' along a coastal promenade with pineapples"
+        default="A photo of a red brick building and a dog"
     )
-    parser.add_argument("--outdir", type=str, default="outputs/bcot_hve_inpaint")
+    parser.add_argument("--outdir", type=str, default="backbone/outputs/bcdm_hve_inpaint")
     parser.add_argument("--offload", action="store_true", help="Enable CPU offload")
     parser.add_argument("--device", type=str, default="cuda", help='Torch device for pipeline, e.g. "cuda:1"')
     args = parser.parse_args()
@@ -42,7 +49,7 @@ def main() -> None:
     print(f"[run_inpaint] Config: {args.config}")
     print(f"[run_inpaint] warm_method={config.get('warm_method')}, T={config.get('T')}, K={config.get('K')}")
 
-    pipe = BCOTHVEPipeline(offload=args.offload, device=args.device)
+    pipe = BCDMPipeline(offload=args.offload, device=args.device, seed=1)
 
     # result = pipe.run(
     #     image=args.image,

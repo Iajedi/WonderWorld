@@ -234,6 +234,7 @@ class BCDMPipeline:
             )
 
         # Replace unknown region with Gaussian noise
+        # if not (blackout_unknown and warm_method == "none"):
         eps = torch.randn_like(z_packed[:1])  # [1, N, C]
         m = mask_token  # [1, N, 1]
         z_packed = (1.0 - m) * z_packed + m * torch.cat([eps, eps], dim=0)

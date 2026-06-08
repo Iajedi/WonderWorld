@@ -41,9 +41,9 @@ from scipy.ndimage import label
 
 BG_COLOR=(1, 0, 0)
 
-# BCOT: PIL mask blur in `FrameSyn.inpaint` and, when `use_flux`, extra dilation of the
+# BCDM: PIL mask blur in `FrameSyn.inpaint` and, when `use_flux`, extra dilation of the
 # new-Gaussian insertion region in `run.py` to match this soft edge.
-BCOT_MASK_GAUSSIAN_BLUR_RADIUS = 10.0
+BCDM_MASK_GAUSSIAN_BLUR_RADIUS = 10.0
 
     
 class PointsRenderer(torch.nn.Module):
@@ -344,7 +344,7 @@ class FrameSyn(torch.nn.Module):
         return depth, disparity
     
     @torch.no_grad()
-    def inpaint(self, rendered_image, inpaint_mask, fill_mask=None, fill_mode = 'cv2_telea', self_guidance=False, style=None, inpainting_prompt=None, negative_prompt=None, mask_strategy=np.min, diffusion_steps=50, bcot_prompt_src=None, bcot_prompt_tgt=None):
+    def inpaint(self, rendered_image, inpaint_mask, fill_mask=None, fill_mode = 'cv2_telea', self_guidance=False, style=None, inpainting_prompt=None, negative_prompt=None, mask_strategy=np.min, diffusion_steps=50, bcdm_prompt_src=None, bcdm_prompt_tgt=None):
         # set resolution
         if self.inpainting_resolution > 512 and rendered_image.shape[-1] == 512:
             padded_inpainting_mask = self.border_mask.clone()
@@ -399,21 +399,21 @@ class FrameSyn(torch.nn.Module):
             if hasattr(self.inpainting_pipeline, "run"):
                 if (
                     not self.use_noprompt
-                    and bcot_prompt_src is not None
-                    and bcot_prompt_tgt is not None
+                    and bcdm_prompt_src is not None
+                    and bcdm_prompt_tgt is not None
                 ):
-                    prompt_src = bcot_prompt_src
-                    prompt_tgt = bcot_prompt_tgt
+                    prompt_src = bcdm_prompt_src
+                    prompt_tgt = bcdm_prompt_tgt
                 else:
                     prompt_src = prompt_tgt = "" if self.use_noprompt else self.inpainting_prompt
-                bcot_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
-                # Slightly blur mask edges for smoother BCOT transitions.
-                bcot_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
-                    ImageFilter.GaussianBlur(radius=BCOT_MASK_GAUSSIAN_BLUR_RADIUS)
+                bcdm_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
+                # Slightly blur mask edges for smoother BCDM transitions.
+                bcdm_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
+                    ImageFilter.GaussianBlur(radius=BCDM_MASK_GAUSSIAN_BLUR_RADIUS)
                 )
-                bcot_mask_np = (np.array(bcot_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
+                bcdm_mask_np = (np.array(bcdm_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
                 is_content_inpainting = fill_mask is not None
-                bcot_config = {
+                bcdm_config = {
                     "T": int(diffusion_steps),
                     "K": max(1, int(diffusion_steps) // 5),
                     "warm_method": "none" if is_content_inpainting else "ot_harmonic",
@@ -421,7 +421,8 @@ class FrameSyn(torch.nn.Module):
                     "omega": 7.0,
                     "alpha_edit": 0.7,
                     "debug": False,
-                    "vae_observed_color_fix": False,
+                    "blackout_unknown": True,
+                    "vae_observed_color_fix": True,
                     "reinject_unknown_expand_px": 4 if is_content_inpainting else 8,
                     "reinject_mask_dilate": 1 if is_content_inpainting else 0,
                     "observed_reinject": True,
@@ -431,8 +432,8 @@ class FrameSyn(torch.nn.Module):
                     "sinkhorn_iters": 100,
                     "lambda_s": 0.2,
                     "connectivity": 8,
-                    "alpha_start": 1,
-                    "alpha_end": 0.9,
+                    "alpha_start": 0.95,
+                    "alpha_end": 0.8,
                     "boundary_band_width": 3,
                     "warm_layers": [
                         ["double", 0],
@@ -445,14 +446,12 @@ class FrameSyn(torch.nn.Module):
                 }
                 output_dir = "output/flux_debug"
                 os.makedirs(output_dir, exist_ok=True)
-                bcot_input_image.save(os.path.join(output_dir, "bcot_input_image.png"))
-                bcot_mask_pil.save(os.path.join(output_dir, "bcot_mask_pil.png"))
                 inpainted_image = self.inpainting_pipeline.run(
-                    image=bcot_input_image,
-                    mask=bcot_mask_np,
+                    image=bcdm_input_image,
+                    mask=bcdm_mask_np,
                     prompt_src=prompt_src,
                     prompt_tgt=prompt_tgt,
-                    config=bcot_config,
+                    config=bcdm_config,
                     output_dir=output_dir,
                     blackout_unknown=not is_content_inpainting,
                 )
@@ -880,8 +879,12 @@ class FrameSyn(torch.nn.Module):
             camera = self.current_camera
         kf_camera = convert_pytorch3d_kornia(camera, self.init_focal_length)
         point_depth = rearrange(depth, "b c h w -> (w h b) c")
+        # Normal estimation time
+        time_start = time.time()
         normals = self.get_normal(image[0])
         normals[:, 1:] *= -1  # Marigold normal is opengl format; make it opencv format here
+        time_end = time.time()
+        print(f"Normal estimation time: {time_end - time_start} seconds")
 
 
         normals_world = kf_camera.rotation_matrix.inverse() @ rearrange(normals, 'b c h w -> b c (h w)')

@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 nlp = spacy.load("en_core_web_sm")
 
 client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", ""),
+    api_key=os.environ.get("OPENAI_API_KEY", "NOT_USED_FOR_INTERNLM"),
     base_url='http://0.0.0.0:23333/v1'
 )
 
@@ -175,11 +175,11 @@ class TextpromptGen(object):
             "background": list(output["background"]) if not isinstance(output["background"], str) else [output["background"]],
         }
 
-    def _scene_dict_for_bcot(self, scene_dict):
+    def _scene_dict_for_bcdm(self, scene_dict):
         return _normalize_scene_dict(dict(scene_dict))
 
     def _scene_user_spec_block(self, style, d, worldscore=False):
-        d = self._scene_dict_for_bcot(d)
+        d = self._scene_dict_for_bcdm(d)
         name = d["scene_name"]
         name0 = name[0] if isinstance(name, (list, tuple)) else str(name)
         ent = d["entities"]
@@ -420,9 +420,9 @@ class TextpromptGen(object):
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
 
-    def build_bcot_inpaint_pair_from_conditioning_image(self, conditioning_image, style, scene_dict, worldscore=False):
+    def build_bcdm_inpaint_pair_from_conditioning_image(self, conditioning_image, style, scene_dict, worldscore=False):
         pil = self._conditioning_image_to_pil(conditioning_image)
-        d = self._scene_dict_for_bcot(scene_dict)
+        d = self._scene_dict_for_bcdm(scene_dict)
         user_spec = self._scene_user_spec_block(style, d, worldscore=worldscore)
 
         system_src = (
@@ -441,10 +441,10 @@ class TextpromptGen(object):
                     system=system_src,
                 )
                 if prompt_src:
-                    print("PROMPT TEXT (BCOT prompt_src, vision): ", prompt_src)
+                    print("PROMPT TEXT (BCDM prompt_src, vision): ", prompt_src)
                     break
             except Exception as e:
-                print(f"OpenAI BCOT prompt_src (vision) retry: {e}")
+                print(f"OpenAI BCDM prompt_src (vision) retry: {e}")
                 time.sleep(0.5)
         if not prompt_src:
             prompt_src = (
@@ -481,10 +481,10 @@ class TextpromptGen(object):
                     ]
                 ).strip()
                 if prompt_tgt:
-                    print("PROMPT TEXT (BCOT prompt_tgt, text): ", prompt_tgt)
+                    print("PROMPT TEXT (BCDM prompt_tgt, text): ", prompt_tgt)
                     break
             except Exception as e:
-                print(f"OpenAI BCOT prompt_tgt retry: {e}")
+                print(f"OpenAI BCDM prompt_tgt retry: {e}")
                 time.sleep(0.5)
         if not prompt_tgt:
             sn = d["scene_name"]
@@ -513,15 +513,15 @@ class TextpromptGen(object):
     def describe_edit_source_without_mask(self, masked_source_image):
         system = (
             "You describe images for object-removal inpainting. The image may contain a black blanked area where "
-            "an object or region was removed. Describe only the visible content outside that blanked area "
+            "an object or region was removed. Describe only the visible content OUTSIDE that blanked area "
             "(scene layout, materials, lighting, background, nearby context) so the follow-up inpaint can produce a "
             "seamless transition into the removed region. Do not describe or guess the removed object. "
             "STRICTLY at most 2 sentences, as concise and precise as possible, preserving only essential visible "
             "details. No title, no bullets, no preamble."
         )
         prompt = (
-            "Describe the image content outside the blanked/removed region so a follow-up model can inpaint it "
-            "seamlessly. Exclude the missing region and do not invent what was there. "
+            "Describe the image background ONLY. "
+            "Exclude the missing region and do not invent what was there. "
             "STRICTLY at most 2 concise, precise sentences with essential details only."
         )
         fallback = (
