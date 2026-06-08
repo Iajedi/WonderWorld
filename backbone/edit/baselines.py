@@ -1,6 +1,6 @@
 """Baseline warm-start methods for ablation comparison.
 
-These are simpler alternatives to the full BCOT-HVE pipeline and are
+These are simpler alternatives to the full BCDM pipeline and are
 selected via the ``warm_method`` config flag.
 """
 

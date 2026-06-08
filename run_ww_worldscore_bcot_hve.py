@@ -1,14 +1,18 @@
-"""Run WonderWorld WorldScore benchmarks with BCOT-HVE and InternLM text generation.
+"""Run WonderWorld WorldScore benchmarks with BCDM and InternLM text generation.
 
 This entrypoint keeps the WorldScore data flow from ``run_ww_worldscore.py``
-while replacing the Stable Diffusion inpaint backend with ``BCOTHVEPipeline``.
+while replacing the Stable Diffusion inpaint backend with ``BCDMPipeline``.
 ``run_ww_worldscore.py`` already imports ``TextpromptGen`` from
 ``util.internlm`` (OpenAI-compatible interface pointing at the local InternLM
 server), so no monkey-patching of the class is required.
 
-BCOT prompt enrichment produces concise ``prompt_src`` / ``prompt_tgt`` pairs
+BCDM prompt enrichment produces concise ``prompt_src`` / ``prompt_tgt`` pairs
 for each inpaint step (vision + text). WorldScore still supplies the raw scene
 prompts; ``use_gpt`` (next-scene LLM generation) remains disabled.
+
+Sky point-cloud initialization is handled by
+``run_ww_worldscore.bootstrap_sky_pointcloud`` inside ``run()`` (same as the
+SD WorldScore runner).
 """
 
 from __future__ import annotations
@@ -17,15 +21,15 @@ import os
 from argparse import ArgumentParser
 
 # ``run_ww_worldscore.py`` imports ``util.chatGPT4`` at module import time.
-# BCOT prompt enrichment uses ``util.internlm`` (OpenAI); set a real
+# BCDM prompt enrichment uses ``util.internlm`` (OpenAI); set a real
 # ``OPENAI_API_KEY`` when not passing ``--no_gemini``. The default below only
 # satisfies chatGPT4 import-time initialization if nothing is set.
-os.environ.setdefault("OPENAI_API_KEY", "unused-for-worldscore-bcot-hve")
+os.environ.setdefault("OPENAI_API_KEY", "unused-for-worldscore-BCDM")
 
 
-_bcot_device = "cuda:1"
-_bcot_model = "klein"
-_bcot_offload = False
+_bcdm_device = "cuda:1"
+_bcdm_model = "klein"
+_bcdm_offload = False
 
 
 class _NoOpComponent:
@@ -36,7 +40,7 @@ class _NoOpComponent:
         return self
 
     def decode(self, *_args, **_kwargs):
-        raise RuntimeError("BCOT-HVE adapter does not expose VAE decoding.")
+        raise RuntimeError("BCDM adapter does not expose VAE decoding.")
 
 
 class _NoOpScheduler:
@@ -47,7 +51,7 @@ class _NoOpScheduler:
         return cls()
 
 
-class _BCOTHVEInpaintAdapter:
+class _BCDMInpaintAdapter:
     """Adapter matching the small HF inpaint surface used by the old runner."""
 
     scheduler = _NoOpScheduler()
@@ -59,17 +63,17 @@ class _BCOTHVEInpaintAdapter:
         return cls()
 
     def __init__(self):
-        from backbone.edit.controller import BCOTHVEPipeline
+        from backbone.edit.controller import BCDMPipeline
 
-        self.device = _bcot_device
+        self.device = _bcdm_device
         print(
-            "Using BCOT-HVE inpainting backend "
-            f"(model={_bcot_model}, device={_bcot_device}, offload={_bcot_offload})."
+            "Using BCDM inpainting backend "
+            f"(model={_bcdm_model}, device={_bcdm_device}, offload={_bcdm_offload})."
         )
-        self.pipeline = BCOTHVEPipeline(
-            offload=_bcot_offload,
-            model=_bcot_model,
-            device=_bcot_device,
+        self.pipeline = BCDMPipeline(
+            offload=_bcdm_offload,
+            model=_bcdm_model,
+            device=_bcdm_device,
         )
 
     def to(self, *args, **kwargs):
@@ -79,7 +83,7 @@ class _BCOTHVEInpaintAdapter:
 
         target = str(target)
         # The legacy runner sends the inpaint pipeline to config["device"].
-        # Keep BCOT-HVE on its configured device, except for explicit CPU
+        # Keep BCDM on its configured device, except for explicit CPU
         # offloads while SyncDiffusion initializes missing sky panoramas.
         if target == "cpu":
             self.pipeline.to("cpu")
@@ -91,13 +95,13 @@ class _BCOTHVEInpaintAdapter:
         return self.pipeline.run(*args, **kwargs)
 
 
-def _install_bcot_hve_backend(ww_module) -> None:
-    ww_module.StableDiffusionInpaintPipeline = _BCOTHVEInpaintAdapter
+def _install_bcdm_hve_backend(ww_module) -> None:
+    ww_module.StableDiffusionInpaintPipeline = _BCDMInpaintAdapter
     ww_module.DDIMScheduler = _NoOpScheduler
 
 
 def _install_gemini_text_gen(ww_module) -> None:
-    """Replace ``TextpromptGen`` with OpenAI-backed ``util.internlm.TextpromptGen`` and wire BCOT prompts.
+    """Replace ``TextpromptGen`` with OpenAI-backed ``util.internlm.TextpromptGen`` and wire BCDM prompts.
 
     Two changes are made to ``ww_module``:
 
@@ -109,7 +113,7 @@ def _install_gemini_text_gen(ww_module) -> None:
        ``_GeminiTextpromptGen`` for reference (not used as the active backend).
 
     2. ``KeyframeGen.inpaint`` is wrapped to call
-       ``pt_gen.build_bcot_inpaint_pair_from_conditioning_image`` before each
+       ``pt_gen.build_bcdm_inpaint_pair_from_conditioning_image`` before each
        inpaint step.  WorldScore still supplies the raw scene prompts.
 
     **First image**: Enrichment is not applied when ``pt_gen`` is ``None`` (sky
@@ -117,8 +121,8 @@ def _install_gemini_text_gen(ww_module) -> None:
 
     **Subsequent images**: once ``pt_gen`` is the internlm class instance, each
     inpaint call gets the same two-step ``prompt_src`` / ``prompt_tgt`` flow as
-    the former Gemini path.  Both ``bcot_prompt_src`` and ``bcot_prompt_tgt``
-    are injected into the inpaint kwargs so the BCOT pipeline uses the proper
+    the former Gemini path.  Both ``bcdm_prompt_src`` and ``bcdm_prompt_tgt``
+    are injected into the inpaint kwargs so the BCDM pipeline uses the proper
     prompt pair.  On failure the original WorldScore prompt is used unchanged.
     """
     from util.gemini_prompt_gen import GeminiTextpromptGen as _GeminiTextpromptGen
@@ -131,14 +135,14 @@ def _install_gemini_text_gen(ww_module) -> None:
     original_inpaint = ww_module.KeyframeGen.inpaint
 
     def inpaint_with_gemini_prompts(self, condition_image, *args, **kwargs):
-        # pt_gen is None before run() sets it (sky bootstrap / first frame) —
+        # pt_gen is None before run() sets it (sky bootstrap / first frame) -
         # the isinstance guard below naturally skips enrichment in that phase.
         pt_gen = ww_module.pt_gen
         if isinstance(pt_gen, _OpenAITextpromptGen):
             ws_prompt = kwargs.get("inpainting_prompt")
             print("ws_prompt: ", ws_prompt)
-            # Skip if caller already supplied explicit BCOT prompts.
-            if ws_prompt is not None and "bcot_prompt_src" not in kwargs:
+            # Skip if caller already supplied explicit BCDM prompts.
+            if ws_prompt is not None and "bcdm_prompt_src" not in kwargs:
                 ws_prompt_str = ws_prompt if isinstance(ws_prompt, str) else str(ws_prompt)
                 scene_dict = {
                     "scene_name": [ws_prompt_str],
@@ -146,74 +150,21 @@ def _install_gemini_text_gen(ww_module) -> None:
                     "background": [ws_prompt_str],
                 }
                 try:
-                    bcot_src, bcot_tgt = pt_gen.build_bcot_inpaint_pair_from_conditioning_image(
+                    bcdm_src, bcdm_tgt = pt_gen.build_bcdm_inpaint_pair_from_conditioning_image(
                         condition_image, ws_prompt.split(" ")[-1], scene_dict, worldscore=True
                     )
-                    if bcot_tgt:
+                    if bcdm_tgt:
                         # Replace the raw WorldScore prompt with the enriched target.
-                        kwargs["inpainting_prompt"] = bcot_tgt
-                        # Inject both sides so the BCOT pipeline uses the full pair
+                        kwargs["inpainting_prompt"] = bcdm_tgt
+                        # Inject both sides so the BCDM pipeline uses the full pair
                         # (otherwise models.py falls back to inpainting_prompt for both).
-                        kwargs["bcot_prompt_src"] = bcot_src
-                        kwargs["bcot_prompt_tgt"] = bcot_tgt
+                        kwargs["bcdm_prompt_src"] = bcdm_src
+                        kwargs["bcdm_prompt_tgt"] = bcdm_tgt
                 except Exception as exc:
-                    print(f"[InternLM/OpenAI BCOT] Prompt generation failed, using WorldScore prompt: {exc}")
+                    print(f"[InternLM/OpenAI BCDM] Prompt generation failed, using WorldScore prompt: {exc}")
         return original_inpaint(self, condition_image, *args, **kwargs)
 
     ww_module.KeyframeGen.inpaint = inpaint_with_gemini_prompts
-
-
-def _install_sky_bootstrap(ww_module) -> None:
-    original_recompose = ww_module.KeyframeGen.recompose_image_latest_and_set_current_pc
-
-    def recompose_with_sky_bootstrap(self, *args, **kwargs):
-        if self.current_pc_sky is None:
-            example = self.config["example_name"]
-            gen_sky_image = bool(self.config["gen_sky_image"])
-            sky_0 = f"./examples/sky_images/{example}/sky_0.png"
-            sky_1 = f"./examples/sky_images/{example}/sky_1.png"
-            needs_syncdiffusion = gen_sky_image or not (os.path.exists(sky_0) and os.path.exists(sky_1))
-            syncdiffusion_model = None
-            inpainter_home_device = (
-                getattr(self.inpainting_pipeline, "device", None)
-                if needs_syncdiffusion
-                else None
-            )
-            if needs_syncdiffusion and hasattr(self.inpainting_pipeline, "to"):
-                self.inpainting_pipeline.to("cpu")
-                ww_module.empty_cache()
-
-            try:
-                if needs_syncdiffusion:
-                    from syncdiffusion.syncdiffusion_model import SyncDiffusion
-
-                    sync_device = self.config["bcot_device"] if self.config["use_flux"] else self.config["device"]
-                    syncdiffusion_model = SyncDiffusion(sync_device, sd_version="2.0-inpaint")
-
-                sky_mask = self.generate_sky_mask().float()
-                if not sky_mask.bool().any().item():
-                    print(
-                        "[WARN] No sky pixels found in the WorldScore start frame; "
-                        "using the top image band to initialize the sky point cloud."
-                    )
-                    sky_mask = sky_mask.clone()
-                    sky_mask[:128, :] = 1.0
-                self.generate_sky_pointcloud(
-                    syncdiffusion_model,
-                    image=self.image_latest,
-                    mask=sky_mask,
-                    gen_sky=gen_sky_image,
-                    style=None,
-                )
-            finally:
-                syncdiffusion_model = None
-                ww_module.empty_cache()
-                if inpainter_home_device is not None and hasattr(self.inpainting_pipeline, "to"):
-                    self.inpainting_pipeline.to(inpainter_home_device)
-
-        return original_recompose(self, *args, **kwargs)
-
-    ww_module.KeyframeGen.recompose_image_latest_and_set_current_pc = recompose_with_sky_bootstrap
 
 
 def _install_layer_prompt_from_current_kf(ww_module) -> None:
@@ -236,21 +187,21 @@ def _install_layer_prompt_from_current_kf(ww_module) -> None:
     ww_module.KeyframeGen.generate_layer = generate_layer_with_current_prompt
 
 
-def _prepare_bcot_config(config, args):
+def _prepare_bcdm_config(config, args):
     from omegaconf import OmegaConf
 
-    global _bcot_device, _bcot_model, _bcot_offload
+    global _bcdm_device, _bcdm_model, _bcdm_offload
 
-    if args.bcot_device is not None:
-        config.bcot_device = args.bcot_device
-    elif OmegaConf.select(config, "bcot_device") is None:
-        config.bcot_device = _bcot_device
+    if args.bcdm_device is not None:
+        config.bcdm_device = args.bcdm_device
+    elif OmegaConf.select(config, "bcdm_device") is None:
+        config.bcdm_device = _bcdm_device
 
-    _bcot_device = str(config.bcot_device)
-    _bcot_model = args.bcot_model
-    _bcot_offload = args.bcot_offload
+    _bcdm_device = str(config.bcdm_device)
+    _bcdm_model = args.bcdm_model
+    _bcdm_offload = args.bcdm_offload
 
-    # KeyframeGen selects the BCOT/FLUX mask and prompt handling from this flag.
+    # KeyframeGen selects the BCDM/FLUX mask and prompt handling from this flag.
     config.use_flux = True
 
     # WorldScore supplies all prompts. Leaving this enabled in the legacy runner
@@ -288,20 +239,20 @@ def parse_args():
         help="Model name",
     )
     parser.add_argument(
-        "--bcot_device",
+        "--bcdm_device",
         default=None,
-        help="Device for BCOT-HVE, e.g. cuda:0 or cuda:1. Defaults to config.bcot_device.",
+        help="Device for BCDM, e.g. cuda:0 or cuda:1. Defaults to config.bcdm_device.",
     )
     parser.add_argument(
-        "--bcot_model",
+        "--bcdm_model",
         default="klein",
         choices=("klein", "flux1"),
-        help="BCOT-HVE backbone model.",
+        help="BCDM backbone model.",
     )
     parser.add_argument(
-        "--bcot_offload",
+        "--bcdm_offload",
         action="store_true",
-        help="Enable CPU offload inside BCOT-HVE.",
+        help="Enable CPU offload inside BCDM.",
     )
     parser.add_argument(
         "--max_runs",
@@ -313,7 +264,7 @@ def parse_args():
         "--gemini_style",
         default="photorealistic",
         help=(
-            "Scene style hint passed to BCOT prompt generation (OpenAI / internlm; "
+            "Scene style hint passed to BCDM prompt generation (OpenAI / internlm; "
             "same flag name as the former Gemini path). "
             "E.g. 'photorealistic', 'oil painting'. Default: photorealistic."
         ),
@@ -322,7 +273,7 @@ def parse_args():
         "--no_gemini",
         action="store_true",
         help=(
-            "Disable LLM BCOT prompt enrichment (no internlm/OpenAI calls); "
+            "Disable LLM BCDM prompt enrichment (no internlm/OpenAI calls); "
             "use raw WorldScore prompts only."
         ),
     )
@@ -338,7 +289,7 @@ def parse_args():
     return args
 
     # Example run
-    # python run_ww_worldscore_bcot_hve.py --base-config config/base-config.yaml --example_config config/example.yaml --worldscore_model_name wonderworld2 --worldscore_visual_movement static --worldscore_json_file static.json --bcot_device cuda:1 --bcot_model klein --bcot_offload --max_runs 1
+    # python run_ww_worldscore_bcdm_hve.py --base-config config/base-config.yaml --example_config config/example.yaml --worldscore_model_name wonderworld2 --worldscore_visual_movement static --worldscore_json_file static.json --bcdm_device cuda:1 --bcdm_model klein --bcdm_offload --max_runs 1
 
 
 def main() -> None:
@@ -350,11 +301,10 @@ def main() -> None:
 
     base_config = OmegaConf.load(args.base_config)
     example_config = OmegaConf.load(args.example_config)
-    config = _prepare_bcot_config(OmegaConf.merge(base_config, example_config), args)
+    config = _prepare_bcdm_config(OmegaConf.merge(base_config, example_config), args)
     config.num_between = args.num_between
 
-    _install_bcot_hve_backend(ww)
-    _install_sky_bootstrap(ww)
+    _install_bcdm_hve_backend(ww)
     _install_layer_prompt_from_current_kf(ww)
 
     if not args.no_gemini:
@@ -366,10 +316,10 @@ def main() -> None:
         args.worldscore_json_file,
     )
 
-    shared_inpainter_pipeline = ww.BCOTHVEPipeline(
-        offload=_bcot_offload,
-        model=_bcot_model,
-        device=_bcot_device,
+    shared_inpainter_pipeline = ww.BCDMPipeline(
+        offload=_bcdm_offload,
+        model=_bcdm_model,
+        device=_bcdm_device,
     )
 
     for run_idx, data in enumerate(dataloader):

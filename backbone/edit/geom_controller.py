@@ -1,4 +1,4 @@
-"""Geometric editing on top of :class:`~edit.controller.BCOTHVEPipeline`."""
+"""Geometric editing on top of :class:`~edit.controller.BCDMPipeline`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 try:
-    from .controller import BCOTHVEPipeline
+    from .controller import BCDMPipeline
     from ..geometry.spec import EditType, GeometrySpec
     from ..geometry.utils import (
         build_boundary_blur_mask,
@@ -20,7 +20,7 @@ try:
         mask_tensor_to_pil_l,
     )
 except ImportError:
-    from backbone.edit.controller import BCOTHVEPipeline
+    from backbone.edit.controller import BCDMPipeline
     from backbone.geometry.spec import EditType, GeometrySpec
     from backbone.geometry.utils import (
         build_boundary_blur_mask,
@@ -38,7 +38,7 @@ def _ensure_rgb_size(im: Image.Image, size_hw: Tuple[int, int]) -> Image.Image:
     return im.convert("RGB").resize((w, h), Image.LANCZOS)
 
 
-class EditPipeline(BCOTHVEPipeline):
+class EditPipeline(BCDMPipeline):
     """Two-stage route: inpaint source, compose with (inverse-warped) target, refine seams."""
 
     def __init__(
@@ -46,7 +46,7 @@ class EditPipeline(BCOTHVEPipeline):
         offload: bool = False,
         model: str = "klein",
         device: str = "cuda",
-        base_pipeline: Optional[BCOTHVEPipeline] = None,
+        base_pipeline: Optional[BCDMPipeline] = None,
     ):
         if base_pipeline is None:
             super().__init__(offload, model, device=device)

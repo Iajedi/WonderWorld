@@ -1,4 +1,4 @@
-"""Screened-harmonic velocity extension for BCOT-HVE.
+"""Screened-harmonic velocity extension for BCDM.
 
 Given a transported source velocity on masked (unknown) tokens and Dirichlet
 boundary conditions from neighbouring known tokens, solve a screened Poisson

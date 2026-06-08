@@ -17,9 +17,9 @@ from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
 from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNormal, MarigoldNormalsPipeline
 
-from backbone.edit.controller import BCDMPipeline
 from models.models import KeyframeGen, save_point_cloud_as_ply
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
+# from util.chatGPT4 import TextpromptGen
 from util.internlm import TextpromptGen
 from util.general_utils import apply_depth_colormap, save_video
 from util.utils import save_depth_map, prepare_scheduler, soft_stitching
@@ -40,7 +40,6 @@ from kornia.morphology import dilation
 import warnings
 import os
 import copy
-from scipy.spatial.transform import Rotation as ScipyRotation, Slerp
 warnings.filterwarnings("ignore")
 
 from worldscore.benchmark.helpers import GetHelpers
@@ -103,99 +102,7 @@ def seeding(seed):
     print(f"running with seed: {seed}.")
 
 
-def bootstrap_sky_pointcloud(kf_gen, inpainter_pipeline, config):
-    """Initialize sky point cloud before the first recompose (requires current_pc_sky)."""
-    example = config["example_name"]
-    sky_0 = f"examples/sky_images/{example}/sky_0.png"
-    sky_1 = f"examples/sky_images/{example}/sky_1.png"
-    needs_syncdiffusion = config["gen_sky_image"] or (
-        not os.path.exists(sky_0) and not os.path.exists(sky_1)
-    )
-
-    syncdiffusion_model = None
-    if needs_syncdiffusion:
-        sync_device = (
-            config.get("bcdm_device", config["device"])
-            if config.get("use_flux")
-            else config["device"]
-        )
-        syncdiffusion_model = SyncDiffusion(sync_device, sd_version="2.0-inpaint")
-
-    sky_mask = kf_gen.generate_sky_mask().float()
-    if not sky_mask.bool().any().item():
-        print(
-            "[WARN] No sky pixels found in the WorldScore start frame; "
-            "using the top image band to initialize the sky point cloud."
-        )
-        sky_mask = sky_mask.clone()
-        sky_mask[:128, :] = 1.0
-
-    inpainter_home_device = (
-        getattr(inpainter_pipeline, "device", None)
-        if syncdiffusion_model is not None
-        else None
-    )
-    if syncdiffusion_model is not None and hasattr(inpainter_pipeline, "to"):
-        inpainter_pipeline.to("cpu")
-        empty_cache()
-    try:
-        kf_gen.generate_sky_pointcloud(
-            syncdiffusion_model,
-            image=kf_gen.image_latest,
-            mask=sky_mask,
-            gen_sky=config["gen_sky_image"],
-            style=None,
-        )
-    finally:
-        syncdiffusion_model = None
-        empty_cache()
-        if inpainter_home_device is not None and hasattr(inpainter_pipeline, "to"):
-            inpainter_pipeline.to(inpainter_home_device)
-
-
-def has_traindata_points(traindata):
-    """Return True when a 3DGS traindata dict contains at least one point."""
-    points = traindata.get("pcd_points")
-    if points is None:
-        return False
-    # pcd_points is usually shaped [3, N] and stored as a NumPy array.
-    return np.asarray(points).size > 0 and points.shape[-1] > 0
-
-
-def interp_pt3d_cameras(cam1, cam2, num_between):
-    """Return num_between evenly-spaced PerspectiveCameras between cam1 and cam2.
-
-    Rotation is interpolated with SLERP; translation is linearly interpolated.
-    Intrinsics (K, image_size) are copied from cam1.
-    """
-    from pytorch3d.renderer import PerspectiveCameras
-
-    R1 = cam1.R[0].cpu().numpy()
-    R2 = cam2.R[0].cpu().numpy()
-    T1 = cam1.T[0].cpu().numpy()
-    T2 = cam2.T[0].cpu().numpy()
-    K = cam1.K
-    camera_device = K.device
-
-    slerp = Slerp(
-        [0, 1],
-        ScipyRotation.from_matrix([R1, R2]),
-    )
-
-    cameras = []
-    for j in range(1, num_between + 1):
-        t = j / (num_between + 1)
-        R_interp = torch.from_numpy(slerp([t]).as_matrix()[0]).unsqueeze(0).to(camera_device)
-        T_interp = torch.from_numpy(T1 + t * (T2 - T1)).unsqueeze(0).to(camera_device)
-        cam = PerspectiveCameras(
-            K=K, R=R_interp, T=T_interp,
-            in_ndc=False, image_size=((512, 512),), device=camera_device,
-        )
-        cameras.append(cam)
-    return cameras
-
-
-def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp, helper, inpainter_pipeline=None):
+def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp, helper):
     global client_id, view_matrix, scene_name, latest_frame, keep_rendering, kf_gen, latest_viz, gaussians, opt, background, scene_dict, style_prompt, pt_gen, change_scene_name_by_user, undo, save, delete, exclude_sky, view_matrix_delete
 
     ###### ------------------ Load modules ------------------ ######
@@ -204,67 +111,33 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
     config.use_gpt = False
 
     seeding(config["seed"])
-    background = background.to(config["device"])
     example = config['example_name']
 
     segment_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_large")
-    segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to(config["device"])
+    segment_model = OneFormerForUniversalSegmentation.from_pretrained("shi-labs/oneformer_ade20k_swin_large").to('cuda')
 
     mask_generator = create_mask_generator_repvit()
 
-    if inpainter_pipeline is None:
-        if config["use_flux"]:
-            inpainter_pipeline = BCDMPipeline(
-                offload=False,
-                model="klein",
-                device=str(config.get("bcdm_device", "cuda:1")),
-            )
-        else:
-            inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-                    config["stable_diffusion_checkpoint"],
-                    safety_checker=None,
-                    torch_dtype=torch.bfloat16,
-                ).to(config["device"])
-            inpainter_pipeline.scheduler = DDIMScheduler.from_config(inpainter_pipeline.scheduler.config)
-            inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
-            inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
-                
-            if config['use_compile']:
-                print('Using torch.compile can speed up inpainting by ~1s, but it takes around 1min to initialize.')
-                torch._inductor.config.conv_1x1_as_mm = True
-                inpainter_pipeline.unet.to(memory_format=torch.channels_last)
-                inpainter_pipeline.vae.to(memory_format=torch.channels_last)
-                inpainter_pipeline.unet = torch.compile(inpainter_pipeline.unet)
-                inpainter_pipeline.vae.decode = torch.compile(inpainter_pipeline.vae.decode)
+    inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
+            config["stable_diffusion_checkpoint"],
+            safety_checker=None,
+            torch_dtype=torch.bfloat16,
+        ).to(config["device"])
+    inpainter_pipeline.scheduler = DDIMScheduler.from_config(inpainter_pipeline.scheduler.config)
+    inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
+    inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
+        
+    if config['use_compile']:
+        print('Using torch.compile can speed up inpainting by ~1s, but it takes around 1min to initialize.')
+        torch._inductor.config.conv_1x1_as_mm = True
+        inpainter_pipeline.unet.to(memory_format=torch.channels_last)
+        inpainter_pipeline.vae.to(memory_format=torch.channels_last)
+        inpainter_pipeline.unet = torch.compile(inpainter_pipeline.unet)
+        inpainter_pipeline.vae.decode = torch.compile(inpainter_pipeline.vae.decode)
     # inpainter_pipeline = None
     
-    num_between = config.get('num_between', 0)
-    if num_between > 0:
-        expanded_cameras = [cameras[0]]
-        for cam_a, cam_b in zip(cameras[:-1], cameras[1:]):
-            expanded_cameras.extend(interp_pt3d_cameras(cam_a, cam_b, num_between))
-            expanded_cameras.append(cam_b)
-        cameras = expanded_cameras
-
-        expanded_prompts = [inpainting_prompt_list[0]]
-        for p_next in inpainting_prompt_list[1:]:
-            expanded_prompts.extend([p_next] * (num_between + 1))
-        inpainting_prompt_list = expanded_prompts
-
-        orig_num_scenes = config['num_scenes']
-        config.num_scenes = orig_num_scenes * (num_between + 1)
-        config.rotation_path = [
-            r for r in config['rotation_path'][:orig_num_scenes]
-            for _ in range(num_between + 1)
-        ]
-
-    base_rp = list(config['rotation_path'])
-    num_scenes = config['num_scenes']
-    if len(base_rp) >= num_scenes:
-        rotation_path = base_rp[:num_scenes]
-    else:
-        # Cycle through the base rotation_path to fill any extra scenes.
-        rotation_path = [base_rp[i % len(base_rp)] for i in range(num_scenes)]
+    rotation_path = config['rotation_path'][:config['num_scenes']]
+    assert len(rotation_path) == config['num_scenes']
     
     depth_model = MarigoldPipeline.from_pretrained("prs-eth/marigold-v1-0", torch_dtype=torch.bfloat16).to(config["device"])
     depth_model.scheduler = EulerDiscreteScheduler.from_config(depth_model.scheduler.config)
@@ -292,7 +165,42 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
     start_keyframe = start_keyframe.convert('RGB').resize((512, 512))
     kf_gen.image_latest = ToTensor()(start_keyframe).unsqueeze(0).to(config['device'])
     
-    bootstrap_sky_pointcloud(kf_gen, inpainter_pipeline, config)
+    sky_0 = f'examples/sky_images/{example}/sky_0.png'
+    sky_1 = f'examples/sky_images/{example}/sky_1.png'
+    if config['gen_sky_image'] or (not os.path.exists(sky_0) and not os.path.exists(sky_1)):
+        syncdiffusion_model = SyncDiffusion(config['device'], sd_version='2.0-inpaint')
+    else:
+        syncdiffusion_model = None
+    sky_mask = kf_gen.generate_sky_mask().float()
+    if not sky_mask.bool().any().item():
+        print(
+            "[WARN] No sky pixels found in the WorldScore start frame; "
+            "using the top image band to initialize the sky point cloud."
+        )
+        sky_mask = sky_mask.clone()
+        sky_mask[:128, :] = 1.0
+
+    _inpainter_home_device = (
+        str(inpainter_pipeline.device)
+        if syncdiffusion_model is not None
+        else None
+    )
+    if syncdiffusion_model is not None:
+        inpainter_pipeline.to('cpu')
+        empty_cache()
+    try:
+        kf_gen.generate_sky_pointcloud(
+            syncdiffusion_model,
+            image=kf_gen.image_latest,
+            mask=sky_mask,
+            gen_sky=config['gen_sky_image'],
+            style=None,
+        )
+    finally:
+        syncdiffusion_model = None
+        empty_cache()
+        if _inpainter_home_device is not None:
+            inpainter_pipeline.to(_inpainter_home_device)
 
     kf_gen.recompose_image_latest_and_set_current_pc(scene_name=scene_name)
     
@@ -350,20 +258,19 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
         traindata, traindata_layer = kf_gen.convert_to_3dgs_traindata_latest_layer(xyz_scale=xyz_scale)
         # gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
         gaussians = GaussianModel(sh_degree=0)
-        if has_traindata_points(traindata_layer):
-            scene = Scene(traindata_layer, gaussians, opt)
-            dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
-            save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene_layer{0:02d}"
-            train_gaussian(gaussians, scene, opt, save_dir)  # Base layer training
+        scene = Scene(traindata_layer, gaussians, opt)
+        dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
+        save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene_layer{0:02d}"
+        train_gaussian(gaussians, scene, opt, save_dir)  # Base layer training
     else:
         traindata = kf_gen.convert_to_3dgs_traindata_latest(xyz_scale=xyz_scale, use_no_loss_mask=False)
 
-    gaussians.visibility_filter_all = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device=config["device"])
-    gaussians.delete_mask_all = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device=config["device"])
-    gaussians.is_sky_filter = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device=config["device"])
+    gaussians.visibility_filter_all = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device='cuda')
+    gaussians.delete_mask_all = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device='cuda')
+    gaussians.is_sky_filter = torch.zeros(gaussians.get_xyz_all.shape[0], dtype=torch.bool, device='cuda')
     
     i = 0
-    if has_traindata_points(traindata):
+    if traindata['pcd_points'].shape[-1] != 0:
         gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
         scene = Scene(traindata, gaussians, opt)
         dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
@@ -558,16 +465,15 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
 
         if config['gen_layer']:
             traindata, traindata_layer = kf_gen.convert_to_3dgs_traindata_latest_layer(xyz_scale=xyz_scale)
-            if has_traindata_points(traindata_layer):
-                gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
-                scene = Scene(traindata_layer, gaussians, opt)
-                dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
-                save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene_layer{i+1:02d}"
-                train_gaussian(gaussians, scene, opt, save_dir)  # Base layer training
+            gaussians = GaussianModel(sh_degree=0, previous_gaussian=gaussians)
+            scene = Scene(traindata_layer, gaussians, opt)
+            dt_string = datetime.now().strftime("%d-%m_%H-%M-%S")
+            save_dir = Path(config['runs_dir']) / f"{dt_string}_gaussian_scene_layer{i+1:02d}"
+            train_gaussian(gaussians, scene, opt, save_dir)  # Base layer training
         else:
             traindata = kf_gen.convert_to_3dgs_traindata_latest(xyz_scale=xyz_scale, use_no_loss_mask=False)
 
-        if not has_traindata_points(traindata):
+        if traindata['pcd_points'].shape[-1] == 0:
             gaussians.set_inscreen_points_to_visible(tdgs_cam)
 
             kf_gen.increment_kf_idx()
@@ -668,14 +574,8 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
 
 def train_gaussian(gaussians: GaussianModel, scene: Scene, opt: GSParams, save_dir: Path, initialize_scaling=True):
     global latest_frame, iter_number, view_matrix, latest_viz
-    if gaussians.get_xyz.numel() == 0:
-        print(f"[WARN] Skipping Gaussian training for empty point set: {save_dir}")
-        return
     iterable_gauss = range(1, opt.iterations + 1)
     trainCameras = scene.getTrainCameras().copy()
-    if len(trainCameras) == 0:
-        print(f"[WARN] Skipping Gaussian training with no train cameras: {save_dir}")
-        return
     gaussians.compute_3D_filter(cameras=trainCameras, initialize_scaling=initialize_scaling)
 
     for iteration in iterable_gauss:
@@ -690,7 +590,7 @@ def train_gaussian(gaussians: GaussianModel, scene: Scene, opt: GSParams, save_d
             render_pkg['render'], render_pkg['viewspace_points'], render_pkg['visibility_filter'], render_pkg['radii'])
 
         # Loss
-        gt_image = viewpoint_cam.original_image.to(image.device)
+        gt_image = viewpoint_cam.original_image.cuda()
 
         # if iteration % 1000 == 0 or iteration == opt.iterations:
         #     ToPILImage()(image).save(save_dir / f'it{iteration:04d}_rendered.png')
@@ -906,26 +806,9 @@ if __name__ == "__main__":
     ### benchmark
     dataloader, helper = GetHelpers(args.worldscore_model_name, args.worldscore_visual_movement, args.worldscore_json_file)
     ###
-
-    shared_inpainter_pipeline = None
-    if config["use_flux"]:
-        shared_inpainter_pipeline = BCDMPipeline(
-            offload=False,
-            model="klein",
-            device=str(config.get("bcdm_device", "cuda:1")),
-        )
     
     for data in dataloader:
         start_keyframe, inpainting_prompt_list, cameras, cameras_interp = helper.adapt(data)
         config.num_scenes = data['num_scenes']
-        run(
-            config,
-            start_keyframe,
-            inpainting_prompt_list,
-            cameras,
-            cameras_interp,
-            helper,
-            inpainter_pipeline=shared_inpainter_pipeline,
-        )
-        empty_cache()
+        run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp, helper)
         # break

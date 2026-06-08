@@ -1,4 +1,4 @@
-"""Tensor-centric geometry specification — single source of truth for geometric edits."""
+"""Tensor-centric geometry specification - single source of truth for geometric edits."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def affine_transform_mask(
 ) -> torch.Tensor:
     """Apply an affine geometry to a binary/soft mask via inverse sampling.
 
-    ``mask`` is ``[1, H, W]``.  ``transform_matrix`` is a forward 3×3 map in pixel
+    ``mask`` is ``[1, H, W]``.  ``transform_matrix`` is a forward 3x3 map in pixel
     coordinates with column vectors ``[j; i; 1]`` (column ``j``, row ``i``)::
 
         [j'; i'; 1] = T @ [j; i; 1].
@@ -52,7 +52,7 @@ def affine_transform_mask(
     device = m.device
     T = transform_matrix.to(device=device, dtype=torch.float64)
     if tuple(T.shape) != (3, 3):
-        raise ValueError(f"transform_matrix must be 3×3, got {tuple(T.shape)}")
+        raise ValueError(f"transform_matrix must be 3x3, got {tuple(T.shape)}")
     inv = torch.linalg.inv(T)
 
     j_out = torch.arange(W, device=device, dtype=torch.float64).view(1, -1).expand(H, W)
@@ -91,8 +91,8 @@ class GeometrySpec:
     mask_user: Optional[torch.Tensor] = None
     prompt_refine: Optional[str] = None
 
-    # Forward 3×3 homogeneous pixel map: [x'; y'; 1] = T @ [x; y; 1].  When warping
-    # images with PIL, use the **inverse** (PIL.Image.AFFINE expects output→input).
+    # Forward 3x3 homogeneous pixel map: [x'; y'; 1] = T @ [x; y; 1].  When warping
+    # images with PIL, use the **inverse** (PIL.Image.AFFINE expects output-->input).
     transform_matrix: Optional[torch.Tensor] = None
     # ``COMPOSE_MULTI``: list of ``(forward_3x3, paste_mask_canvas [1,H,W])`` after
     # ``affine_transform_mask`` (sequential paste from inverse-warped ``tgt``).

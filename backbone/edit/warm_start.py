@@ -1,4 +1,4 @@
-"""K-step warm-start loop with transformer hook management for BCOT-HVE.
+"""K-step warm-start loop with transformer hook management for BCDM.
 
 Registers forward hooks on selected DiT blocks to capture intermediate
 hidden states, runs K denoising steps with OT-based velocity transport
@@ -64,23 +64,31 @@ class WarmStartHookManager:
         num_txt_tokens: int,
     ):
         self.transformer = transformer
-        self.warm_layers = warm_layers
+        self.warm_layers = []
         self.num_txt_tokens = num_txt_tokens
         self._handles: list = []
         self._captured: Dict[Tuple[str, int], torch.Tensor] = {}
 
     def register(self) -> None:
-        for block_type, idx in self.warm_layers:
-            if block_type == "double":
-                block = self.transformer.transformer_blocks[idx]
-            elif block_type == "single":
-                block = self.transformer.single_transformer_blocks[idx]
-            else:
-                raise ValueError(f"Unknown block type {block_type!r}")
-
-            key = (block_type, idx)
-            handle = block.register_forward_hook(self._make_hook(key, block_type))
+        # Iterate through all blocks in the transformer
+        for idx, block in enumerate(self.transformer.transformer_blocks):
+            handle = block.register_forward_hook(self._make_hook(("double", idx), "double"))
             self._handles.append(handle)
+        for idx, block in enumerate(self.transformer.single_transformer_blocks):
+            handle = block.register_forward_hook(self._make_hook(("single", idx), "single"))
+            self._handles.append(handle)
+
+        # for block_type, idx in self.warm_layers:
+        #     if block_type == "double":
+        #         block = self.transformer.transformer_blocks[idx]
+        #     elif block_type == "single":
+        #         block = self.transformer.single_transformer_blocks[idx]
+        #     else:
+        #         raise ValueError(f"Unknown block type {block_type!r}")
+
+        #     key = (block_type, idx)
+        #     handle = block.register_forward_hook(self._make_hook(key, block_type))
+        #     self._handles.append(handle)
 
     def _make_hook(self, key: Tuple[str, int], block_type: str):
         def hook_fn(module, inp, output):

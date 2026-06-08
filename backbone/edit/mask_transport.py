@@ -1,4 +1,4 @@
-"""Optimal-transport velocity transfer for BCOT-HVE warm-start.
+"""Optimal-transport velocity transfer for BCDM warm-start.
 
 Builds a cost matrix between unknown and known image tokens, solves
 entropic OT via log-domain Sinkhorn, and produces a barycentric
