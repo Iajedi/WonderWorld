@@ -17,7 +17,7 @@ from util.stable_diffusion_inpaint import StableDiffusionInpaintPipeline
 from diffusers.models.attention_processor import AttnProcessor2_0
 from marigold_lcm.marigold_pipeline import MarigoldPipeline, MarigoldPipelineNormal, MarigoldNormalsPipeline
 
-from backbone.edit.controller import BCDMPipeline
+from backbone.pipeline import BackbonePipeline
 from models.models import KeyframeGen, save_point_cloud_as_ply
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
 from util.internlm import TextpromptGen
@@ -214,9 +214,8 @@ def run(config, start_keyframe, inpainting_prompt_list, cameras, cameras_interp,
 
     if inpainter_pipeline is None:
         if config["use_flux"]:
-            inpainter_pipeline = BCDMPipeline(
+            inpainter_pipeline = BackbonePipeline(
                 offload=False,
-                model="klein",
                 device=str(config.get("bcdm_device", "cuda:1")),
             )
         else:
@@ -909,9 +908,8 @@ if __name__ == "__main__":
 
     shared_inpainter_pipeline = None
     if config["use_flux"]:
-        shared_inpainter_pipeline = BCDMPipeline(
+        shared_inpainter_pipeline = BackbonePipeline(
             offload=False,
-            model="klein",
             device=str(config.get("bcdm_device", "cuda:1")),
         )
     

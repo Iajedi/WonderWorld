@@ -1,7 +1,7 @@
 """Run WonderWorld WorldScore benchmarks with BCDM and InternLM text generation.
 
 This entrypoint keeps the WorldScore data flow from ``run_ww_worldscore.py``
-while replacing the Stable Diffusion inpaint backend with ``BCDMPipeline``.
+while replacing the Stable Diffusion inpaint backend with our backbone.
 ``run_ww_worldscore.py`` already imports ``TextpromptGen`` from
 ``util.internlm`` (OpenAI-compatible interface pointing at the local InternLM
 server), so no monkey-patching of the class is required.
@@ -64,16 +64,15 @@ class _BCDMInpaintAdapter:
         return cls()
 
     def __init__(self):
-        from backbone.edit.controller import BCDMPipeline
+        from backbone.pipeline import BackbonePipeline
 
         self.device = _bcdm_device
         print(
             "Using BCDM inpainting backend "
-            f"(model={_bcdm_model}, device={_bcdm_device}, offload={_bcdm_offload})."
+            f"FLUX.2 with device={_bcdm_device}, offload={_bcdm_offload})."
         )
-        self.pipeline = BCDMPipeline(
+        self.pipeline = BackbonePipeline(
             offload=_bcdm_offload,
-            model=_bcdm_model,
             device=_bcdm_device,
         )
 
@@ -290,9 +289,8 @@ def main() -> None:
         args.worldscore_json_file,
     )
 
-    shared_inpainter_pipeline = ww.BCDMPipeline(
+    shared_inpainter_pipeline = ww.BackbonePipeline(
         offload=_bcdm_offload,
-        model=_bcdm_model,
         device=_bcdm_device,
     )
 

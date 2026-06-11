@@ -45,7 +45,7 @@ class BCDMFluxKleinMethod(InpaintingMethod):
         if str(_REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(_REPO_ROOT))
 
-        from backbone.edit.controller import BCDMPipeline
+        from backbone.pipeline import BackbonePipeline
 
         cfg_path = _REPO_ROOT / self.config_path
         if not cfg_path.exists():
@@ -54,11 +54,9 @@ class BCDMFluxKleinMethod(InpaintingMethod):
         with open(cfg_path, encoding="utf-8") as f:
             self._config = yaml.safe_load(f)
 
-        self._pipe = BCDMPipeline(
+        self._pipe = BackbonePipeline(
             offload=self.offload,
-            model=self.model,
             device=str(self.device),
-            seed=self.seed,
         )
         self._loaded = True
 

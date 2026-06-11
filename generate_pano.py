@@ -59,7 +59,7 @@ from torchvision.transforms import ToPILImage, ToTensor
 from transformers import OneFormerForUniversalSegmentation, OneFormerProcessor
 
 from arguments import CameraParams, GSParams
-from backbone.edit.controller import BCDMPipeline
+from backbone.pipeline import BackbonePipeline
 from gaussian_renderer import render
 from models.models import KeyframeGen
 from scene import GaussianModel, Scene
@@ -580,22 +580,10 @@ def generate_and_render_panorama(args: Namespace) -> dict:
     mask_generator = create_mask_generator_repvit()
 
     if config["use_flux"]:
-        inpainter_pipeline = BCDMPipeline(
+        inpainter_pipeline = BackbonePipeline(
             offload=False,
-            model="klein",
             device=str(config.get("bcdm_device", device)),
         )
-    else:
-        inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-            config["stable_diffusion_checkpoint"],
-            safety_checker=None,
-            torch_dtype=torch.bfloat16,
-        ).to(device)
-        inpainter_pipeline.scheduler = DDIMScheduler.from_config(
-            inpainter_pipeline.scheduler.config
-        )
-        inpainter_pipeline.unet.set_attn_processor(AttnProcessor2_0())
-        inpainter_pipeline.vae.set_attn_processor(AttnProcessor2_0())
 
     depth_model = MarigoldPipeline.from_pretrained(
         "prs-eth/marigold-v1-0", torch_dtype=torch.bfloat16

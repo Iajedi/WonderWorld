@@ -103,13 +103,13 @@ def _compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     return float(a * num_steps + b)
 
 class BackbonePipeline:
-    def __init__(self, offload=False, device: str = "cuda"):
+    def __init__(self, offload=False, device: str = "cuda", seed=42):
         self.device = str(device)
         
         # FLUX.2 [klein] 4B as the base model
         model_path = "black-forest-labs/FLUX.2-klein-base-4B"
 
-        self.pipe = Flux2KleinPipeline.from_pretrained(model_path, torch_dtype=dtype)
+        self.pipe = Flux2KleinPipeline.from_pretrained(model_path, torch_dtype=dtype, seed=seed)
 
         # We utilise our existing UniEdit-Flow schedulers for inversion and editing.
         # Uni-Inv scheduler as-is for inversion

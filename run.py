@@ -149,7 +149,6 @@ def run(config):
         # Use FLUX
         inpainter_pipeline = BackbonePipeline(offload=False, device=config["bcdm_device"])
         edit_pipeline = inpainter_pipeline
-        # inpainter_pipeline = BCDMPipeline(offload=True, model="klein", device=config["bcdm_device"])
     else:
         # Use SD checkpoint
         inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
@@ -194,7 +193,7 @@ def run(config):
 
     # Free cuda:1 while SyncDiffusion generates all sky images, then restore.
     _inpainter_home_device = (
-        inpainter_pipeline.device          # BCDMPipeline: stored str, never changes
+        inpainter_pipeline.device          # backbone: stored str, never changes
         if config["use_flux"]
         else str(inpainter_pipeline.device)  # HF pipeline: reflect before offload
     ) if syncdiffusion_model is not None else None
