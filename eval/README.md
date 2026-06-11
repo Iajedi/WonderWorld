@@ -2,6 +2,8 @@
 
 Lightweight, reproducible benchmarking for inpainting, outpainting (panoramic) and geometric editing. The suite builds fixed 1k-sample benchmarks from Flickr30k + NVIDIA masks (inpainting) or GeoBench 2D (geometric editing), runs methods through unified adapter interfaces, and reports PSNR, LPIPS, FID, and CLIP prompt adherence where applicable.
 
+Dataset fetching and adapter code for baselines written with help from Cursor Composer 2.5.
+
 ## Folder structure
 
 ```
@@ -21,22 +23,17 @@ eval/
 
 ## Install
 
-The evaluation suite uses a **separate environment** from inpainting model inference. This keeps heavy IQA dependencies (pyiqa, metric weights) isolated from diffusion pipelines.
-
 From the repository root:
 
 ```bash
-conda create -n wonderworld_eval python=3.10 -y
-conda activate wonderworld_eval
 pip install -r eval/requirements.txt
 ```
 
-For inpainting runs, continue using `conda activate wonderworld_bw`.
+For inpainting runs, continue using the original wonderworld backbone environment
 
 Notes:
 
 - Metrics are computed via **pyiqa** (`psnr`, `lpips`, `fid`, `clipscore`) when installed.
-- Fallback implementations use `scikit-image`, `lpips`, or `transformers` if pyiqa is missing.
 - `datasets<4.0` is recommended because `nlphuji/flickr30k` uses a Hugging Face loading script.
 - Metric model weights download on first evaluation run.
 
@@ -118,7 +115,7 @@ Caveats:
 
 ## 3. Build benchmark manifest
 
-Pairs 1k images with 1k masks deterministically and preprocesses both to 512x512 using **center crop after shortest-side resize**.
+Pairs 1k images with 1k masks deterministically and preprocesses both to 512x512 (for our backbone) using **center crop.**
 
 ```bash
 python -m eval.data.sample_subset \
@@ -186,9 +183,7 @@ FID is computed once over all evaluated samples in a run (requires at least 2 sa
 2. Implement `load()`, `infer(...)`, optional `unload()`
 3. Register in `eval/methods/__init__.py` `METHOD_REGISTRY`
 
-Example stub: `eval/methods/example_sd15_stub.py` (Stable Diffusion 1.5 inpainting via diffusers).
-
-Supported future adapters: FLUX.2 klein 4B, FLUX.1 Fill dev, SD1.5 inpainting, BCDM, etc.
+Supported adapters: FLUX.2 klein 4B (our method), FLUX.1 Fill dev, SD1.5 inpainting, BCDM, etc.
 
 ## Reproducibility
 
@@ -206,7 +201,7 @@ All sampling, pairing, and caption selection honor `--seed`. Re-running with the
 
 ## GeoBench 2D geometric editing
 
-GeoBench (`[CIawevy/GeoBench](https://huggingface.co/datasets/CIawevy/GeoBench)`) benchmarks **spatially-aware image editing**: moving, resizing, or repositioning objects using source and target geometry masks plus a text description. This integration uses config `**2d`**, split `**data**` (5677 examples), and a reproducible random subset of **1000** rows.
+GeoBench (`[CIawevy/GeoBench](https://huggingface.co/datasets/CIawevy/GeoBench)`) benchmarks **spatially-aware image editing**: moving, resizing, or repositioning objects using source and target geometry masks plus a text description. This integration uses config `**2d`**, split `**data`** (5677 examples), and a reproducible random subset of **1000** rows.
 
 ### Model inputs (per example)
 
@@ -258,37 +253,9 @@ Manifest columns include `coarse_input_path`, `edit_param_iou`, and processed as
 
 At manifest build time, `edit_param` is used to predict `tgt_mask` from `ori_mask` (FreeFine-style affine) and log IoU against the dataset mask. **Inference does not apply `edit_param`** — the FLUX adapter feeds resized masks as-is via a socket-style `GeometrySpec`.
 
-### 3. Run geometric editing benchmark
+### 3. FLUX geometric editing test (single sample)
 
-Dummy baseline (returns source image unchanged):
-
-```bash
-python -m eval.runners.run_geometric_edit \
-  --method dummy_geo \
-  --manifest eval/output/manifests/geobench_2d_1k.csv \
-  --output-dir eval/output/geobench_dummy \
-  --limit 64 \
-  --seed 42 \
-  --device cuda
-```
-
-Custom model stub (visualizes target-mask wiring; replace with your model):
-
-```bash
-python -m eval.runners.run_geometric_edit \
-  --method custom_geo_stub \
-  --manifest eval/output/manifests/geobench_2d_1k.csv \
-  --output-dir eval/output/geobench_custom \
-  --limit 64 \
-  --seed 42 \
-  --device cuda
-```
-
-Outputs under `--output-dir`: `results.csv`, `summary.json`, `config.json`, `images/`.
-
-### 4. FLUX geometric editing smoke test (single sample)
-
-Uses `EditPipeline` with identical source/target prompts (`4v_caption`) and socket-style masks (no `edit_param` warp at inference):
+Uses `BackbonePipeline` from `backbone/pipeline.py` with identical source/target prompts (`4v_caption`) and socket-style masks (no `edit_param` warp at inference):
 
 ```bash
 python -m eval.runners.run_geometric_edit \
@@ -324,15 +291,11 @@ Without `coarse_input_path`:
 - **Computes CLIP score** (generated image + `4v_caption`)
 - **Skips PSNR, LPIPS, and FID** (recorded as `NaN` in `results.csv`)
 
-Registered geometric methods include `flux_geom` / `bcdm_flux_geom` (FLUX EditPipeline), `design_edit` (DesignEdit / SDXL), and `freefine` / `freefine_geom` (FreeFine / SD1.5).
+Registered geometric methods include `bcdm_flux_geom` (our method), `design_edit` (DesignEdit / SDXL), and `freefine` / `freefine_geom` (FreeFine / SD1.5).
 
 ### External baselines (DesignEdit, FreeFine)
 
-Clone upstream repos and install thin GeoBench launchers:
-
-```bash
-bash eval/scripts/setup_external_baselines.sh
-```
+Clone upstream repos and use thin GeoBench launchers.
 
 Checkouts live under `eval/external/` (gitignored). DesignEdit’s `model.py` is patched from FreeFine’s evaluation fork to add `infer_2d_edit`.
 
@@ -350,11 +313,9 @@ Model paths (override via env vars):
 - `DESIGNEDIT_SDXL_PATH` (default: `stabilityai/stable-diffusion-xl-base-1.0`)
 - `FREEFINE_SD15_PATH` (default: `runwayml/stable-diffusion-v1-5`)
 
-**DesignEdit smoke test** (single sample):
+**Example: DesignEdit smoke test** (single sample):
 
 ```bash
-bash eval/scripts/generate_geobench_designedit.sh
-# or from checkout:
 cd eval/external/DesignEdit
 python run_geometric_edit.py \
   --manifest ../../../output/manifests/geobench_2d_1k.csv \
@@ -362,41 +323,16 @@ python run_geometric_edit.py \
   --sample-id 000000 --seed 42 --device cuda
 ```
 
-**FreeFine smoke test** (background generation + refinement; ~2x slower per sample):
-
-```bash
-bash eval/scripts/generate_geobench_freefine.sh
-```
-
-Run both smoke tests:
-
-```bash
-SAMPLE_ID=000000 bash eval/scripts/smoke_test_baselines.sh
-```
-
-FreeFine caches inpainted backgrounds under `{output_dir}/inp_backgrounds/{sample_id}.png` for resume.
-
-### Adding a geometric editing method
-
-1. Subclass `GeometricEditMethod` in `eval/methods/geometric_edit.py`
-2. Implement `load()`, `infer(ori_img, ori_mask, tgt_mask, prompt)`, optional `unload()`
-3. Register in `GEO_METHOD_REGISTRY` in the same file
-
-External baselines (e.g. [DesignEdit](https://github.com/CIawevy/FreeFine/tree/main/evaluation/DesignEdit)) can be added as additional `GeometricEditMethod` subclasses without modifying the inpainting runner.
-
-Example integration point: `CustomGeoStubMethod.infer()` — replace the visualization stub with your model call.
-
 ## Panoramic Novel View Benchmark
 
 ### Overview
 
-Evaluates 3D scene generation quality using a horizontal panoramic camera sweep.
-Generates 9 views spanning a configurable yaw range (default ±60°) and computes:
+Evaluates 3D scene generation quality using a horizontal panoramic camera sweep. Generates 9 views spanning a configurable yaw range (default +-60°) and computes:
 
 - **CS** — CLIP Score: cosine similarity between scene prompt and each rendered view
 - **CC** — CLIP Consistency: cosine similarity between each view and the central (yaw=0°) view
 - **CIQA** — CLIP-IQA+: no-reference perceptual quality score
-- **CAS** — CLIP Aesthetic Score: LAION aesthetic predictor score (0–10)
+- **CAS** — CLIP Aesthetic Score: LAION aesthetic predictor score (0-10)
 
 ### Input format
 
