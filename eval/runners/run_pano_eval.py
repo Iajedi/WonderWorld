@@ -1,4 +1,4 @@
-"""Panoramic novel-view evaluation runner."""
+"""Panoramic novel-view evaluation runner. Code adapted from run_ww_worldscore_bcdm.py"""
 
 from __future__ import annotations
 

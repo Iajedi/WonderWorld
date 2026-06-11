@@ -1,4 +1,4 @@
-"""Single-method evaluation runner."""
+"""Single-method evaluation runner. Coding assistance by Cursor Composer 2.5."""
 
 from __future__ import annotations
 

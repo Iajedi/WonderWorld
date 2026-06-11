@@ -1,4 +1,4 @@
-"""Build the final benchmark manifest by pairing images and masks."""
+"""Build the final benchmark manifest by pairing images and masks. Coding assistance by Cursor Composer 2.5."""
 
 from __future__ import annotations
 

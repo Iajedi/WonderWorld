@@ -77,68 +77,6 @@ def _psnr(ref: Image.Image, pred: Image.Image) -> float:
     return float(10.0 * np.log10(255.0**2 / mse))
 
 
-def verify_geometric_output(
-    *,
-    manifest_path: Path,
-    output_path: Path,
-    sample_id: str,
-    out_dir: Path,
-) -> dict:
-    """Build a comparison panel and alignment metrics for one sample."""
-    row = _load_manifest_row(manifest_path, sample_id)
-    out_dir = ensure_dir(out_dir)
-
-    with (
-        Image.open(row["ori_img_path"]) as ori,
-        Image.open(output_path) as out_img,
-        Image.open(row["tgt_mask_path"]) as tgt_m,
-    ):
-        ori_img = ori.convert("RGB").copy()
-        output = out_img.convert("RGB").copy()
-        tgt_mask = to_grayscale(tgt_m).copy()
-
-    coarse_input: Image.Image | None = None
-    coarse_path = str(row.get("coarse_input_path") or "")
-    if coarse_path and Path(coarse_path).is_file():
-        with Image.open(coarse_path) as coarse:
-            coarse_input = coarse.convert("RGB").copy()
-
-    panel = _make_panel(ori_img, output, coarse_input, tgt_mask)
-    panel_path = out_dir / f"{sample_id}_panel.png"
-    panel.save(panel_path)
-
-    metrics: dict[str, float | str] = {
-        "sample_id": sample_id,
-        "output_path": str(output_path),
-        "panel_path": str(panel_path),
-    }
-
-    ori_arr = np.array(ori_img, dtype=np.float32)
-    out_arr = np.array(output, dtype=np.float32)
-    diff = np.mean(np.abs(ori_arr - out_arr), axis=2)
-    edited_region = diff > 12.0
-    tgt_bool = np.asarray(binarize_mask(tgt_mask), dtype=bool)
-    if edited_region.any() and tgt_bool.any():
-        inter = np.logical_and(edited_region, tgt_bool).sum()
-        union = np.logical_or(edited_region, tgt_bool).sum()
-        metrics["edited_region_tgt_iou"] = float(inter / union) if union else 0.0
-    else:
-        metrics["edited_region_tgt_iou"] = 0.0
-
-    if coarse_input is not None:
-        metrics["psnr_vs_coarse_input"] = _psnr(coarse_input, output)
-        metrics["coarse_input_path"] = coarse_path
-
-    metrics["edit_param_iou"] = float(row.get("edit_param_iou") or 0.0)
-
-    metrics_path = out_dir / f"{sample_id}_metrics.json"
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
-
-    logger.info("Wrote panel %s and metrics %s", panel_path, metrics_path)
-    return metrics
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify GeoBench geometric edit output")
     parser.add_argument("--manifest", type=str, required=True)

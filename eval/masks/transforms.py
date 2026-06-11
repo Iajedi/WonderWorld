@@ -1,4 +1,4 @@
-"""Spatial transforms shared by images and masks."""
+"""Spatial transforms shared by images and masks. Helper function code written by Cursor Composer 2.5."""
 
 from __future__ import annotations
 

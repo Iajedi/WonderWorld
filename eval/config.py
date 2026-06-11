@@ -1,4 +1,4 @@
-"""Default configuration for the inpainting evaluation suite."""
+"""Default configuration for the evaluation suite for our method."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 _EVAL_ROOT = Path(__file__).resolve().parent
 
-# Flickr30k
+# Flickr30k (inpainting)
 DEFAULT_FLICKR30K_DATASET = "nlphuji/flickr30k"
 STREAMING_FLICKR30K_DATASET = "lmms-lab/flickr30k"
 DEFAULT_FLICKR30K_SPLIT = "test"
@@ -15,7 +15,7 @@ DEFAULT_SUBSET_COUNT = 1000
 DEFAULT_SUBSET_SEED = 42
 DEFAULT_CAPTION_STRATEGY = "first"  # "first" | "seeded_random"
 
-# NVIDIA irregular mask testing set
+# NVIDIA irregular mask testing set (inpainting)
 # Override via CLI --url if this link is stale.
 # Official page: https://nv-adlr.github.io/publication/partialconv-inpainting
 # Official testing-set archive (Dropbox mirror linked from NVIDIA ADLR page).

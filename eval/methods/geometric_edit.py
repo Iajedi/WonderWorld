@@ -98,7 +98,7 @@ class BCDMFluxGeoMethod(GeometricEditMethod):
             raise RuntimeError("Gemini prompt generator is not initialized.")
 
         _ensure_repo_root()
-        from backbone.edit.socket_edit import masked_source_for_caption
+        from backbone.geometry.socket_edit import masked_source_for_caption
         from eval.methods.geobench_spec import build_geobench_geometry_spec
 
         size = self.canvas_size

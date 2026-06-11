@@ -8,10 +8,8 @@ from PIL import Image
 from eval.methods._hf_common import make_generator, prepare_inpaint_inputs
 from eval.methods.base import InpaintingMethod
 
-
+# SD 2 method for Flickr30K inpainting evaluation.
 class SD2InpaintMethod(InpaintingMethod):
-    """Text-guided inpainting with ``sd2-community/stable-diffusion-2-inpainting``."""
-
     name = "sd2_inpaint"
     model_id = "sd2-community/stable-diffusion-2-inpainting"
 

@@ -8,10 +8,8 @@ from PIL import Image
 from eval.methods._hf_common import make_generator, prepare_inpaint_inputs
 from eval.methods.base import InpaintingMethod
 
-
+# SD 1.5 method for Flickr30K inpainting evaluation.
 class SD15InpaintMethod(InpaintingMethod):
-    """Text-guided inpainting with ``runwayml/stable-diffusion-inpainting``."""
-
     name = "sd15_inpaint"
     model_id = "stable-diffusion-v1-5/stable-diffusion-inpainting"
 

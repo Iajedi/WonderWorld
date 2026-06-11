@@ -12,7 +12,6 @@ def pair_indices(
     mode: str = "fixed",
     seed: int = 42,
 ) -> list[int]:
-    """Return mask index for each image index."""
     if num_images != num_masks:
         raise ValueError(
             f"Image count ({num_images}) must equal mask count ({num_masks}) for pairing."

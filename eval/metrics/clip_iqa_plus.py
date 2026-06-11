@@ -1,4 +1,4 @@
-"""CLIP-IQA+ (CIQA) no-reference perceptual quality metric."""
+"""CLIP-IQA+ (CIQA) no-reference perceptual quality metric. Coding assistance by Cursor Composer 2.5."""
 
 from __future__ import annotations
 

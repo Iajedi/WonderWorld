@@ -1,4 +1,4 @@
-"""CLIP Aesthetic Score (CAS) using LAION improved aesthetic predictor."""
+"""CLIP Aesthetic Score (CAS) using LAION improved aesthetic predictor. Coding assistance by Cursor Composer 2.5."""
 
 from __future__ import annotations
 

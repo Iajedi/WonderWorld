@@ -1,4 +1,4 @@
-"""CLIP prompt adherence metric."""
+"""CLIP prompt adherence metric. Using OpenCLIP for CLIP score"""
 
 from __future__ import annotations
 
@@ -38,59 +38,18 @@ def _load_open_clip(device: str) -> tuple[Any, Any, Any]:
     return model, preprocess, tokenizer
 
 
-def _load_transformers_clip(device: str) -> tuple[Any, Any, Any]:
-    from transformers import CLIPModel, CLIPProcessor
-
-    model_id = "openai/clip-vit-base-patch32"
-    model = CLIPModel.from_pretrained(model_id).to(device)
-    model.eval()
-    processor = CLIPProcessor.from_pretrained(model_id)
-    return model, processor, None
-
-
 def _load_clip(device: str) -> tuple[str, Any, Any, Any]:
     global _BACKEND, _MODEL, _PREPROCESS, _TOKENIZER
-    if _MODEL is None:
-        backend_order = {
-            "open_clip": ("open_clip", "pyiqa", "transformers"),
-            "pyiqa": ("pyiqa", "open_clip", "transformers"),
-            "transformers": ("transformers", "open_clip", "pyiqa"),
-        }.get(CLIP_BACKEND, ("open_clip", "pyiqa", "transformers"))
-
-        for backend in backend_order:
-            if backend == "pyiqa" and pyiqa_available():
-                try:
-                    _BACKEND = "pyiqa"
-                    _MODEL = _load_pyiqa_clipscore(device)
-                    _PREPROCESS = None
-                    _TOKENIZER = None
-                    return _BACKEND, _MODEL, _PREPROCESS, _TOKENIZER
-                except Exception:
-                    continue
-            if backend == "open_clip":
-                try:
-                    model, preprocess, tokenizer = _load_open_clip(device)
-                    _BACKEND = "open_clip"
-                    _MODEL = model
-                    _PREPROCESS = preprocess
-                    _TOKENIZER = tokenizer
-                    return _BACKEND, _MODEL, _PREPROCESS, _TOKENIZER
-                except ImportError:
-                    continue
-            if backend == "transformers":
-                try:
-                    model, preprocess, tokenizer = _load_transformers_clip(device)
-                    _BACKEND = "transformers"
-                    _MODEL = model
-                    _PREPROCESS = preprocess
-                    _TOKENIZER = tokenizer
-                    return _BACKEND, _MODEL, _PREPROCESS, _TOKENIZER
-                except Exception:
-                    continue
-        raise RuntimeError("No CLIP backend available (tried open_clip, pyiqa, transformers).")
+    model, preprocess, tokenizer = _load_open_clip(device)
+    _BACKEND = "open_clip"
+    _MODEL = model
+    _PREPROCESS = preprocess
+    _TOKENIZER = tokenizer
     return _BACKEND, _MODEL, _PREPROCESS, _TOKENIZER
 
-
+# Compute cosine similarity between generated image and prompt.
+# Use OpenCLIP for CLIP score
+# With ViT-L/14 model: https://github.com/mlfoundations/open_clip
 def compute(
     ref: Image.Image,
     pred: Image.Image,
@@ -111,35 +70,13 @@ def compute(
         image = image.crop(mask_bounding_box(mask))
 
     with torch.no_grad():
-        if backend == "pyiqa":
-            image_t = pil_to_tensor(image, device)
-            score = model(image_t, caption_list=[prompt])
-            if score.ndim > 0:
-                score = score.squeeze()
-        elif backend == "open_clip":
-            image_t = preprocess(image).unsqueeze(0).to(device)
-            text_t = tokenizer([prompt]).to(device)
-            image_features = model.encode_image(image_t)
-            text_features = model.encode_text(text_t)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            score = (image_features @ text_features.T).squeeze()
-        else:
-            inputs = preprocess(
-                text=[prompt],
-                images=image,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=77,
-            )
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            outputs = model(**inputs)
-            image_features = outputs.image_embeds
-            text_features = outputs.text_embeds
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            score = (image_features @ text_features.T).squeeze()
+        image_t = preprocess(image).unsqueeze(0).to(device)
+        text_t = tokenizer([prompt]).to(device)
+        image_features = model.encode_image(image_t)
+        text_features = model.encode_text(text_t)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        score = (image_features @ text_features.T).squeeze()
 
     return float(score.item())
 

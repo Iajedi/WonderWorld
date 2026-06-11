@@ -27,7 +27,7 @@ def encode_image(
         features = features / features.norm(dim=-1, keepdim=True)
     return features.squeeze(0)
 
-
+# Compute CLIP consistency between each view and the central view. 
 def compute_clip_consistency(
     views: list[Image.Image],
     central_index: int,
@@ -45,9 +45,12 @@ def compute_clip_consistency(
     if not views:
         return {"per_view_cc": [], "mean_cc": float("nan")}
 
+    # Encode each view
     embeddings = [
         encode_image(clip_model, clip_preprocess, view, device) for view in views
     ]
+
+    # Obtain central view embedding
     central_emb = embeddings[central_index]
 
     per_view_cc: list[float] = []
@@ -63,18 +66,17 @@ def compute_clip_consistency(
     mean_cc = float(sum(valid_scores) / len(valid_scores)) if valid_scores else float("nan")
     return {"per_view_cc": per_view_cc, "mean_cc": mean_cc}
 
-
+# Use OpenCLIP for CC scoring
+# With ViT-L/14 model: https://github.com/mlfoundations/open_clip
 def preload(device: str = "cpu") -> tuple[Any, Any]:
     """Load ViT-L/14 via open_clip for CC scoring."""
-    global _CLIP_MODEL, _CLIP_PREPROCESS
-    if _CLIP_MODEL is None:
-        import open_clip
+    import open_clip
 
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            "ViT-L-14", pretrained="openai"
-        )
-        _CLIP_MODEL = model.to(device).eval()
-        _CLIP_PREPROCESS = preprocess
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-L-14", pretrained="openai"
+    )
+    _CLIP_MODEL = model.to(device).eval()
+    _CLIP_PREPROCESS = preprocess
     return _CLIP_MODEL, _CLIP_PREPROCESS
 
 
