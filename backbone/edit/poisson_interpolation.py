@@ -1,5 +1,4 @@
-"""Poisson interpolation (a form of harmonic extension), used for BCDM warm start.
-"""
+"""Poisson interpolation (a form of harmonic extension), used for BCDM warm start."""
 
 from __future__ import annotations
 
@@ -8,12 +7,13 @@ from typing import Tuple
 import torch
 
 try:
-    from ..utils.mask_ops import build_neighbor_pairs
+    from utils.mask_ops import build_neighbor_pairs
 except ImportError:
     from backbone.utils.mask_ops import build_neighbor_pairs
 
 
 # Helper function to build the graph Laplacian restricted to masked (unknown) tokens. Writing assisted by Cursor Claude Opus 4.6
+# Purpose: assistance in optimising the multi-step process of building each component of the Laplacian matrix.
 def build_masked_laplacian(
     mask_2d: torch.Tensor,
     connectivity: int = 8,
@@ -83,7 +83,7 @@ def build_masked_laplacian(
 
 
 # Core poisson interpolation (harmonic extension) function.
-def harmonic_extend(
+def poisson_interp(
     v_transported: torch.Tensor,
     v_tgt: torch.Tensor,
     v_src_full: torch.Tensor,
@@ -94,10 +94,10 @@ def harmonic_extend(
     connectivity: int = 4,
 ) -> torch.Tensor:
     # Build masked Laplacian
-    # We 
     L, masked_idx, bdry_idx, B_adj = build_masked_laplacian(mask_2d, connectivity)
     U = masked_idx.numel()
 
+    # If no unknown tokens, return original
     if U == 0:
         return v_transported
 
@@ -122,6 +122,7 @@ def harmonic_extend(
     else:
         bdry_term = torch.zeros_like(data_term)
 
+    # rhs of equation: data term (lambda_s * u_t) + boundary term (known velocities along boundary)
     rhs = data_term + bdry_term  # [B, U, C]
 
     A_batched = A_sys.unsqueeze(0).expand(B_batch, -1, -1)
