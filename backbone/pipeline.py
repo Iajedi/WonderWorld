@@ -109,7 +109,8 @@ class BackbonePipeline:
         # FLUX.2 [klein] 4B as the base model
         model_path = "black-forest-labs/FLUX.2-klein-base-4B"
 
-        self.pipe = Flux2KleinPipeline.from_pretrained(model_path, torch_dtype=dtype, seed=seed)
+        self.pipe = Flux2KleinPipeline.from_pretrained(model_path, torch_dtype=dtype)
+        self.seed = seed
 
         # We utilise our existing UniEdit-Flow schedulers for inversion and editing.
         # Uni-Inv scheduler as-is for inversion
@@ -210,6 +211,7 @@ class BackbonePipeline:
             width=512,
             callback_on_step_end=store_intermediate_latents if store_for_reinjection else None,
             callback_on_step_end_tensor_inputs=["latents"],
+            generator=torch.Generator(device=self.device).manual_seed(self.seed),
         ).images
 
         # Patchify and BN normalize latent
@@ -521,10 +523,12 @@ class BackbonePipeline:
                 expand_unknown_pixels=4,
                 dilate_tokens=0
             )
+        else:
+            harmonisation_token_mask = None
 
         # Replace unknown region with Gaussian noise (naive initialisation)
         if not skip_bcdm:
-            eps = torch.randn_like(z_1_packed[:1]) # Noise
+            eps = torch.randn_like(z_1_packed[:1], generator=torch.Generator(device=z_1_packed.device).manual_seed(self.seed)) # Noise
             z_1_packed = (1. - token_mask) * z_1_packed + token_mask * torch.cat([eps, eps], dim=0)
 
         # Boundary-constrained distribution matching (BCDM)
@@ -570,9 +574,9 @@ class BackbonePipeline:
             omega=omega,
             warm_start_steps=warm_start_steps,
             known_mask=reinject_token_mask,
-            harmonisation_mask=None,
-            harmonisation_token_mask=None,
-            late_steps=0
+            harmonisation_mask=harmonisation_mask,
+            harmonisation_token_mask=harmonisation_token_mask,
+            late_steps=late_steps
         )
         
         # Decode latent to image
@@ -677,10 +681,7 @@ class BackbonePipeline:
         refine_mask_np = build_boundary_blur_mask(
             spec.mask_tgt,
             size_hw=image_size,
-            # band_kernel_size=band_k,
             gaussian_radius=blur_r,
-            # sigma_inside=sigma_in,
-            # sigma_outside=sigma_out,
         )
         target_mask_np = geom_mask_to_np(spec.mask_tgt, image_size)
         # Expand to have the union of target mask and seam mask
