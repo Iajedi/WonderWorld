@@ -9,6 +9,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+# Helper function to convert mask image to numpy array.
+def mask_image_to_numpy(mask_image: Image.Image) -> np.ndarray:
+    mask = np.array(mask_image.convert("L")) / 255.0
+    return mask.astype(np.float32).reshape(1, 1, 512, 512)
 
 # Token grid from token grid dimensions. Writing assisted by Cursor Composer 2.5
 def build_token_grid(token_hw: Tuple[int, int], device: torch.device, dtype: torch.dtype) -> torch.Tensor:

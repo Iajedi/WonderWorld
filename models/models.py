@@ -383,91 +383,37 @@ class FrameSyn(torch.nn.Module):
         if negative_prompt is None:
             negative_prompt = self.adaptive_negative_prompt + self.negative_inpainting_prompt if self.adaptive_negative_prompt != None else self.negative_inpainting_prompt
       
+        # Use our method for outpainting
         if self.use_flux:
-            # max_res = max(self.inpainting_resolution, 576)
-            # inpainted_image = self.inpainting_pipeline(
-            #     prompt="" if self.use_noprompt else self.inpainting_prompt,
-            #     image=init_image,
-            #     mask_image=mask_image,
-            #     height=max_res,
-            #     width=max_res,
-            #     guidance_scale=50,
-            #     num_inference_steps=diffusion_steps,
-            #     max_sequence_length=512,
-            #     generator=torch.Generator("cpu").manual_seed(0),
-            # ).images[0]
-            if hasattr(self.inpainting_pipeline, "run"):
-                if (
-                    not self.use_noprompt
-                    and bcdm_prompt_src is not None
-                    and bcdm_prompt_tgt is not None
-                ):
-                    prompt_src = bcdm_prompt_src
-                    prompt_tgt = bcdm_prompt_tgt
-                else:
-                    prompt_src = prompt_tgt = "" if self.use_noprompt else self.inpainting_prompt
-                bcdm_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
-                # Slightly blur mask edges for smoother BCDM transitions.
-                bcdm_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
-                    ImageFilter.GaussianBlur(radius=BCDM_MASK_GAUSSIAN_BLUR_RADIUS)
-                )
-                bcdm_mask_np = (np.array(bcdm_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
-                is_content_inpainting = fill_mask is not None
-                bcdm_config = {
-                    "T": int(diffusion_steps),
-                    "K": max(1, int(diffusion_steps) // 5),
-                    "warm_method": "none" if is_content_inpainting else "ot_harmonic",
-                    "seed": self.config.get("seed"),
-                    "omega": 7.0,
-                    "alpha_edit": 0.7,
-                    "debug": False,
-                    "blackout_unknown": True,
-                    "vae_observed_color_fix": True,
-                    "reinject_unknown_expand_px": 4 if is_content_inpainting else 8,
-                    "reinject_mask_dilate": 1 if is_content_inpainting else 0,
-                    "observed_reinject": True,
-                    "lambda_pos": 0.1,
-                    "lambda_bdry": 5.0,
-                    "tau": 0.05,
-                    "sinkhorn_iters": 100,
-                    "lambda_s": 0.2,
-                    "connectivity": 8,
-                    "alpha_start": 0.95,
-                    "alpha_end": 0.8,
-                    "boundary_band_width": 3,
-                    "warm_layers": [
-                        ["double", 0],
-                        ["double", 4],
-                        ["single", 4],
-                        ["single", 5],
-                        ["single", 15],
-                        ["single", 19],
-                    ],
-                }
-                output_dir = "output/flux_debug"
-                os.makedirs(output_dir, exist_ok=True)
-                inpainted_image = self.inpainting_pipeline.run(
-                    image=bcdm_input_image,
-                    mask=bcdm_mask_np,
-                    prompt_src=prompt_src,
-                    prompt_tgt=prompt_tgt,
-                    config=bcdm_config,
-                    output_dir=output_dir,
-                    blackout_unknown=not is_content_inpainting,
-                )
+            # Set source and target prompts
+            if (
+                not self.use_noprompt
+                and bcdm_prompt_src is not None
+                and bcdm_prompt_tgt is not None
+            ):
+                prompt_src = bcdm_prompt_src
+                prompt_tgt = bcdm_prompt_tgt
             else:
-                max_res = max(self.inpainting_resolution, 576)
-                inpainted_image = self.inpainting_pipeline(
-                    prompt="" if self.use_noprompt else self.inpainting_prompt,
-                    image=init_image,
-                    mask_image=mask_image,
-                    height=max_res,
-                    width=max_res,
-                    guidance_scale=50,
-                    num_inference_steps=diffusion_steps,
-                    max_sequence_length=512,
-                    generator=torch.Generator("cpu").manual_seed(0),
-                ).images[0]
+                prompt_src = prompt_tgt = "" if self.use_noprompt else self.inpainting_prompt
+            
+            # Resize input image and mask to 512x512
+            bcdm_input_image = init_image.resize((512, 512), Image.Resampling.LANCZOS)
+            
+            # Slightly blur mask edges for smoother outpainting.
+            bcdm_mask_pil = mask_image.resize((512, 512), Image.Resampling.NEAREST).filter(
+                ImageFilter.GaussianBlur(radius=BCDM_MASK_GAUSSIAN_BLUR_RADIUS)
+            )
+            bcdm_mask_np = (np.array(bcdm_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
+            
+            # Run outpainting/inpainting
+            is_content_inpainting = fill_mask is not None # If fill_mask is not None, then it is content inpainting for foreground layer
+            inpainted_image = self.inpainting_pipeline.run(
+                image=bcdm_input_image,
+                prompt_src=prompt_src,
+                prompt_tgt=prompt_tgt,
+                warm_start_steps=0 if is_content_inpainting else 10,
+                unknown_mask=bcdm_mask_np,
+            )
             inpainted_image = inpainted_image.resize((self.inpainting_resolution, self.inpainting_resolution), Image.Resampling.LANCZOS)
             inpainted_image = torchvision.transforms.ToTensor()(inpainted_image).to(self.device)
         else:

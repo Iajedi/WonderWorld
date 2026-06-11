@@ -20,9 +20,10 @@ from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler
 # Integration of our method
 from diffusers import FluxFillPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
 from diffusers import Flux2KleinPipeline
-from backbone.edit.controller import BCDMPipeline
-from backbone.edit.geom_controller import EditPipeline
-from backbone.edit.socket_edit import (
+from backbone.pipeline import BackbonePipeline
+
+# Socket.IO editing payload helpers
+from backbone.geometry.socket_edit import (
     EditPayloadError,
     build_socket_geometry_spec,
     decode_edit_payload,
@@ -38,6 +39,8 @@ from models.models import KeyframeGen, save_point_cloud_as_ply, BCDM_MASK_GAUSSI
 from util.gs_utils import save_pc_as_3dgs, convert_pc_to_splat
 # from util.chatGPT4 import TextpromptGen
 # from util.internlm import TextpromptGen
+
+# We use Gemini LLM generation for interactive demo
 from util.gemini_prompt_gen import GeminiTextpromptGen as TextpromptGen, GeminiTextpromptGen
 from util.general_utils import apply_depth_colormap, save_video
 from util.utils import save_depth_map, prepare_scheduler, soft_stitching
@@ -134,7 +137,6 @@ def run(config):
     ###### ------------------ Load modules ------------------ ######
 
     runtime_config = config
-    edit_pipeline_config = _load_edit_pipeline_config()
     seeding(config["seed"])
     example = config['example_name']
 
@@ -145,23 +147,9 @@ def run(config):
     
     if config["use_flux"]:
         # Use FLUX
-        # pipe = FluxFillPipeline.from_pretrained("black-forest-labs/FLUX.1-Fill-dev", torch_dtype=torch.bfloat16)
-        # pipe.enable_model_cpu_offload()
-        # DFloat11Model.from_pretrained('DFloat11/FLUX.1-Fill-dev-DF11', device='cpu', bfloat16_model=pipe.transformer)
-        # inpainter_pipeline = pipe
-        # transformer = FluxTransformer2DModel.from_single_file(
-        #     "https://huggingface.co/YarvixPA/FLUX.1-Fill-dev-gguf/blob/main/flux1-fill-dev-Q4_0.gguf",
-        #     quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
-        #     torch_dtype=torch.bfloat16,
-        # )
-        # device = torch.device("cuda:1")
-        # inpainter_pipeline = FluxFillPipeline.from_pretrained(
-        #     "black-forest-labs/FLUX.1-Fill-dev",
-        #     transformer=transformer,
-        #     torch_dtype=torch.bfloat16,
-        # ).to(device)
-        inpainter_pipeline = BCDMPipeline(offload=True, model="klein", device=config["bcdm_device"])
-        edit_pipeline = EditPipeline(base_pipeline=inpainter_pipeline)
+        inpainter_pipeline = BackbonePipeline(offload=False, device=config["bcdm_device"])
+        edit_pipeline = inpainter_pipeline
+        # inpainter_pipeline = BCDMPipeline(offload=True, model="klein", device=config["bcdm_device"])
     else:
         # Use SD checkpoint
         inpainter_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
@@ -205,10 +193,6 @@ def run(config):
     sky_mask = kf_gen.generate_sky_mask().float()
 
     # Free cuda:1 while SyncDiffusion generates all sky images, then restore.
-    # inpainter_pipeline (BCDMPipeline) and edit_pipeline share the same
-    # underlying wrapper, so moving one moves both.  For the SD case the
-    # inpainter lives on a different GPU (config["device"]) so offloading it
-    # is a no-op cost-wise but still safe.
     _inpainter_home_device = (
         inpainter_pipeline.device          # BCDMPipeline: stored str, never changes
         if config["use_flux"]
@@ -439,6 +423,7 @@ def run(config):
             outpaint_mask = inpaint_mask_0p0_nosky * mask_using_nosky_render + inpaint_mask_0p0 * mask_using_full_render
             outpaint_mask = dilation(outpaint_mask, kernel=torch.ones(7, 7).cuda())
 
+        # Initial experiments show that widening the mask by a few pixels helps with blending inpainted region with the background.
         # Widen the region for adding Gaussians under FLUX/BCDM: matches BCDM mask blur edge (PIL) in
         # models.models.BCDM_MASK_GAUSSIAN_BLUR_RADIUS and KeyframeGen.inpaint.
         if config["use_flux"]:
@@ -649,71 +634,76 @@ def train_gaussian(gaussians: GaussianModel, scene: Scene, opt: GSParams, save_d
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
-
-def _load_edit_pipeline_config():
-    config_path = Path(__file__).resolve().parent / "backbone" / "configs" / "geom_edit_pipeline.yaml"
-    raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-    return {k: v for k, v in raw.items() if k not in ("geometry", "inputs")}
-
-
+# SocketIO helper functions
+# Editing status
 def _emit_edit_status(room, stage, message):
     socketio.emit("edit_status", {"stage": stage, "message": message}, room=room)
 
-
+# Editing errors
 def _emit_edit_error(room, message, details=None):
     payload = {"message": message}
     if details is not None:
         payload["details"] = details
     socketio.emit("edit_error", payload, room=room)
 
-
+# Main function to process edit submission from frontend SocketIO event
 def _process_edit_submit(data, room):
-    global pt_gen, edit_pipeline, edit_pipeline_config, runtime_config
+    global pt_gen, edit_pipeline, runtime_config
 
+    # Return if another edit is running
     if not edit_lock.acquire(blocking=False):
         _emit_edit_error(room, "Another edit is already running. Please wait for it to finish.")
         return
 
     try:
+        # Check presence of required components
         if edit_pipeline is None:
-            raise RuntimeError("Edit geometry requires config['use_flux'] so the BCDM/FLUX pipeline is available.")
+            raise RuntimeError("Edit pipeline not initialized.")
         if pt_gen is None:
-            raise RuntimeError("Gemini prompt generator is not ready yet.")
-        if runtime_config is None or edit_pipeline_config is None:
-            raise RuntimeError("Wonderworld runtime is not initialized yet.")
+            raise RuntimeError("Prompt generator is not ready yet.")
+        if runtime_config is None:
+            raise RuntimeError("WonderWorld runtime is not initialized yet.")
 
+        # Edit payload processing code
         _emit_edit_status(room, "payload_received", "Edit payload received.")
         decoded = decode_edit_payload(data)
-        _emit_edit_status(room, "images_decoded", "All edit images decoded as 512x512 PNGs.")
-        _emit_edit_status(room, "mask_processed", "Source and target masks normalized to binary masks.")
+        _emit_edit_status(room, "payload_decoded", "Edit payload decoded.")
 
+        # Generate masked source image for caption (for inpainting prompt generation)
         masked_source = masked_source_for_caption(decoded.source_image, decoded.source_mask)
-        _emit_edit_status(room, "original_region_removed", "Original selected region removed for captioning.")
+        _emit_edit_status(room, "masked_source_generated", "Masked source image generated.")
 
         source_caption = pt_gen.describe_edit_source_without_mask(masked_source)
-        _emit_edit_status(room, "caption_generated", "Source-scene caption generated.")
+        _emit_edit_status(room, "source_caption_generated", "Source scene caption generated.")
 
         composed_caption = None
 
+        # Callback function to describe composed image (for refinement prompt generation)
         def describe_composed(composed_image):
             nonlocal composed_caption
-            _emit_edit_status(room, "flux_pass_complete", "First edit composition pass complete.")
             composed_caption = pt_gen.describe_composed_edit_image(composed_image)
-            _emit_edit_status(room, "composed_image_described", "Composed image description generated.")
+            _emit_edit_status(room, "composed_caption_generated", "Composed image caption generated.")
             return composed_caption
 
+        # Build edit spec and run edit pipeline
         spec = build_socket_geometry_spec(decoded, source_caption, source_caption)
-        output_dir = str(Path(kf_gen.run_dir) / "edit_geom") if kf_gen is not None else "outputs/edit_geom"
-        result = edit_pipeline.run(
+        output_dir = str(Path(kf_gen.run_dir) / "edit_geom") if kf_gen is not None else ""
+
+        # Run edit pipeline
+        result = edit_pipeline.run_geom_edit(
             src_image=decoded.source_image,
             tgt_image=decoded.target_image,
             spec=spec,
-            config=edit_pipeline_config,
-            output_dir=output_dir,
             composition_prompt_callback=describe_composed,
         )
 
-        _apply_edit_result_to_scene(
+        # Save intermediate edit result
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            result.save(os.path.join(output_dir, "edit_result.png"))
+
+        # Apply edit result to scene
+        apply_edit_result_to_scene(
             result,
             decoded,
             room,
@@ -721,6 +711,8 @@ def _process_edit_submit(data, room):
             composed_caption or source_caption,
             source_caption,
         )
+
+        # Send edit result to SocketIO
         socketio.emit(
             "edit_result",
             {
@@ -741,8 +733,8 @@ def _process_edit_submit(data, room):
     finally:
         edit_lock.release()
 
-
-def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_description, layer_scene_description=None):
+# Core function to apply edit result to scene
+def apply_edit_result_to_scene(result_image, decoded, room, config, scene_description, layer_scene_description=None):
     global kf_gen, gaussians, opt, background, view_matrix_wonder
 
     if kf_gen is None or gaussians is None or opt is None:
@@ -759,6 +751,8 @@ def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_descr
     source_region = decoded.source_mask_tensor if decoded.removes_source_region else torch.zeros_like(decoded.source_mask_tensor)
     edit_mask = torch.maximum(source_region, decoded.target_mask_tensor).unsqueeze(0).to(device)
     edit_mask_float = edit_mask.float()
+    
+    # Dilate the edit mask for new Gaussian insertion region for smoother blending
     if config["use_flux"]:
         k = 5 * int(np.ceil(BCDM_MASK_GAUSSIAN_BLUR_RADIUS)) + 1
         k = min(k, 31)
@@ -766,9 +760,11 @@ def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_descr
     else:
         dilated_edit_mask = edit_mask_float
 
+    # Remove existing Gaussians from the edited region (existing function in GaussianModel)
     gaussians.delete_regions(tdgs_cam, edit_mask)
     _emit_edit_status(room, "existing_region_removed", "Existing Gaussians removed from the edited region.")
 
+    # Downstream code logic (adapted from existing WonderWorld code)
     _emit_edit_status(room, "depth_prediction_started", "Depth prediction started.")
     with torch.no_grad():
         kf_gen.get_depth(kf_gen.image_latest, archive_output=True, diffusion_steps=30, guidance_steps=8)
@@ -794,6 +790,7 @@ def _apply_edit_result_to_scene(result_image, decoded, room, config, scene_descr
     kf_gen.image_latest = recomposed
     _emit_edit_status(room, "depth_prediction_completed", "Depth prediction completed.")
 
+    # Generate layers
     if config["gen_layer"]:
         _emit_edit_status(room, "layer_generation_started", "Layer generation started.")
         layer_prompt = layer_scene_description or scene_description
