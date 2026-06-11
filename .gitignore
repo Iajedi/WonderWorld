@@ -23,4 +23,5 @@ repvit_sam.pt
 output/
 .secret
 *.splat
+examples/
 **/.freefine_checkout/
