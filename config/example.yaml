@@ -1,5 +1,5 @@
-runs_dir: output/main_square
-example_name: main_square
+runs_dir: output/lego
+example_name: lego
 # city_hall, main_square, venice
 
 seed: 1
@@ -7,7 +7,7 @@ seed: 1
 depth_conditioning: True
 
 # use gpt to generate scene description
-use_gpt: True
+use_gpt: False
 debug: True
 
 # depth model and camera/depth parameters

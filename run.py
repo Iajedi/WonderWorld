@@ -160,7 +160,7 @@ def run(config):
         #     transformer=transformer,
         #     torch_dtype=torch.bfloat16,
         # ).to(device)
-        inpainter_pipeline = BCDMPipeline(offload=False, model="klein", device=config["bcdm_device"])
+        inpainter_pipeline = BCDMPipeline(offload=True, model="klein", device=config["bcdm_device"])
         edit_pipeline = EditPipeline(base_pipeline=inpainter_pipeline)
     else:
         # Use SD checkpoint
@@ -451,7 +451,7 @@ def run(config):
             outpaint_mask_for_new_points = outpaint_mask
         
         bcdm_src, bcdm_tgt = "", ""
-        if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"]:
+        if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"] and config["use_gpt"]:
             bcdm_src, bcdm_tgt = pt_gen.build_bcdm_inpaint_pair_from_conditioning_image(
                 outpaint_condition_image, style_prompt, scene_dict
             )
@@ -462,9 +462,6 @@ def run(config):
         inpaint_output = kf_gen.inpaint(outpaint_condition_image, inpaint_mask=outpaint_mask, fill_mask=fill_mask, inpainting_prompt=inpainting_prompt, mask_strategy=np.max, diffusion_steps=50, bcdm_prompt_src=bcdm_src, bcdm_prompt_tgt=bcdm_tgt)
         time_end = time.time()
         print(f"Inpainting time: {time_end - time_start} seconds")
-
-        # TODO: Prune edited regions (mask union of all edited regions)
-        # TODO: Edit output (equivalent to inpainting entire image)
 
         sem_seg = kf_gen.update_sky_mask()
         recomposed = soft_stitching(render_pkg["render"], kf_gen.image_latest, kf_gen.sky_mask_latest)  # Replace generated sky with rendered sky

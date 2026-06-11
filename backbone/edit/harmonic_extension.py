@@ -1,9 +1,4 @@
-"""Screened-harmonic velocity extension for BCDM.
-
-Given a transported source velocity on masked (unknown) tokens and Dirichlet
-boundary conditions from neighbouring known tokens, solve a screened Poisson
-system on the masked sub-grid to produce a smooth, boundary-continuous
-velocity field.
+"""Poisson interpolation (a form of harmonic extension), used for BCDM warm start.
 """
 
 from __future__ import annotations
@@ -18,35 +13,16 @@ except ImportError:
     from backbone.utils.mask_ops import build_neighbor_pairs
 
 
+# Helper function to build the graph Laplacian restricted to masked (unknown) tokens. Writing assisted by Cursor Claude Opus 4.6
 def build_masked_laplacian(
     mask_2d: torch.Tensor,
-    connectivity: int = 4,
+    connectivity: int = 8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build the graph Laplacian restricted to masked (unknown) tokens.
-
-    Parameters
-    ----------
-    mask_2d : ``[H, W]``
-        Binary mask, 1 = unknown, 0 = known.
-    connectivity : int
-        4-neighbour or 8-neighbour grid adjacency.
-
-    Returns
-    -------
-    L : ``[U, U]``
-        Dense graph Laplacian on masked nodes.
-    masked_flat_indices : ``[U]``
-        Flat indices of unknown tokens in the full ``H*W`` grid.
-    boundary_flat_indices : ``[B_n]``
-        Flat indices of *known* tokens that are direct neighbours of at
-        least one unknown token (Dirichlet boundary nodes).
-    bdry_to_masked_adj : ``[U, B_n]``
-        Adjacency matrix between unknown tokens and boundary nodes
-        (1 where they are grid neighbours, 0 otherwise).
-    """
+    # Get mask dimensions and device
     H, W = mask_2d.shape
     device = mask_2d.device
 
+    # Flatten mask and get masked indices
     mask_flat = mask_2d.reshape(-1) > 0.5
     masked_indices = mask_flat.nonzero(as_tuple=False).squeeze(-1)  # [U]
     U = masked_indices.numel()
@@ -58,17 +34,21 @@ def build_masked_laplacian(
     flat_to_local = torch.full((H * W,), -1, dtype=torch.long, device=device)
     flat_to_local[masked_indices] = torch.arange(U, device=device)
 
+    # Build neighbor pairs (8-neighbour grid adjacency)
     pairs = build_neighbor_pairs(H, W, connectivity).to(device)
 
     both_masked = mask_flat[pairs[:, 0]] & mask_flat[pairs[:, 1]]
     inner_pairs = pairs[both_masked]
 
     A = torch.zeros(U, U, device=device)
+    # Build adjacency matrix for inner pairs
     if inner_pairs.numel() > 0:
+        # Get local indices of inner pairs (inner pairs, set to 1.0)
         li = flat_to_local[inner_pairs[:, 0]]
         lj = flat_to_local[inner_pairs[:, 1]]
         A[li, lj] = 1.0
 
+    # Build diagonal degree matrix
     D = A.sum(dim=1).diag()
     L = D - A
 
@@ -102,6 +82,7 @@ def build_masked_laplacian(
     return L, masked_indices, boundary_flat_indices, bdry_to_masked_adj
 
 
+# Core poisson interpolation (harmonic extension) function.
 def harmonic_extend(
     v_transported: torch.Tensor,
     v_tgt: torch.Tensor,
@@ -112,41 +93,8 @@ def harmonic_extend(
     token_hw: Tuple[int, int],
     connectivity: int = 4,
 ) -> torch.Tensor:
-    """Screened-harmonic extension of the transported velocity.
-
-    Solves per channel:
-
-        (L_M + lambda_s I) v_tilde = lambda_s (alpha v_transport + (1-alpha) v_tgt)
-                                      + B_adj @ v_bdry_src
-
-    Boundary velocities are extracted automatically from ``v_src_full``
-    using the boundary indices determined by the graph Laplacian.
-
-    Parameters
-    ----------
-    v_transported : ``[B, U, C]``
-        OT-transported source velocity on unknown tokens.
-    v_tgt : ``[B, U, C]``
-        Target-branch velocity on unknown tokens.
-    v_src_full : ``[B, N, C]``
-        Source-branch velocity for **all** tokens (known + unknown).
-        Boundary velocities are sliced from this tensor internally.
-    mask_2d : ``[H, W]``
-        Binary mask (1 = unknown).
-    alpha : float
-        Blending weight (higher = more transported, lower = more target).
-    lambda_s : float
-        Screening strength (data-fidelity vs. smoothness trade-off).
-    token_hw : ``(int, int)``
-        Token grid height and width.
-    connectivity : int
-        Grid adjacency (4 or 8).
-
-    Returns
-    -------
-    v_tilde : ``[B, U, C]``
-        Harmonically-extended velocity for unknown tokens.
-    """
+    # Build masked Laplacian
+    # We 
     L, masked_idx, bdry_idx, B_adj = build_masked_laplacian(mask_2d, connectivity)
     U = masked_idx.numel()
 
@@ -159,8 +107,11 @@ def harmonic_extend(
 
     L = L.to(device=device, dtype=torch.float32)
     B_adj = B_adj.to(device=device, dtype=torch.float32)
+    
+    # Build coefficient matrix (L + lambda_s * I)
     A_sys = L + lambda_s * torch.eye(U, device=device, dtype=torch.float32)  # [U, U]
 
+    # Build lambda_s * u_t (rhs of equation) (transported + target velocity)
     data_term = lambda_s * (
         alpha * v_transported.float() + (1.0 - alpha) * v_tgt.float()
     )  # [B, U, C]
@@ -174,6 +125,8 @@ def harmonic_extend(
     rhs = data_term + bdry_term  # [B, U, C]
 
     A_batched = A_sys.unsqueeze(0).expand(B_batch, -1, -1)
+
+    # Solve for harmonised unknown region velocity
     v_tilde = torch.linalg.solve(A_batched, rhs)  # [B, U, C]
 
     return v_tilde.to(dtype=dtype)

@@ -105,8 +105,6 @@ class BCDMFluxGeoMethod(GeometricEditMethod):
         rgb = self._as_rgb(ori_img).resize((size, size), Image.Resampling.LANCZOS)
         ori_m = self._prepare_geo_mask(ori_mask, size)
         tgt_m = self._prepare_geo_mask(tgt_mask, size)
-        ori_m.save("ori_m.png")
-        tgt_m.save("tgt_m.png")
 
         edit_param = kwargs.get("edit_param") or kwargs.get("edit_param_json")
         if edit_param is None:
@@ -169,11 +167,9 @@ from eval.methods.design_edit_geom import DesignEditGeoMethod
 from eval.methods.freefine_geom import FreeFineGeoMethod
 
 GEO_METHOD_REGISTRY: dict[str, type[GeometricEditMethod]] = {
-    "flux_geom": BCDMFluxGeoMethod,
     "bcdm_flux_geom": BCDMFluxGeoMethod,
     "design_edit": DesignEditGeoMethod,
     "freefine": FreeFineGeoMethod,
-    "freefine_geom": FreeFineGeoMethod,
 }
 
 

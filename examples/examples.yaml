@@ -167,3 +167,9 @@
   content_prompt: Indoor kitchen
   negative_prompt: ""
   background: ""
+- name: worldscore2
+  image_filepath: examples/images/027.png
+  style_prompt: DSLR 35mm landscape
+  content_prompt: Indoor kitchen
+  negative_prompt: ""
+  background: ""

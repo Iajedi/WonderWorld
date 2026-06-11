@@ -7,8 +7,8 @@ seed: 1
 # enable guided depth diffusion
 depth_conditioning: True
 
-# use gpt to generate scene description
-use_gpt: True
+# use gpt to generate scene description (disabled for WorldScore; prompts come from the benchmark)
+use_gpt: False
 debug: False
 
 # depth model and camera/depth parameters
@@ -35,4 +35,5 @@ gen_layer: True
 load_gen: False
 
 # USE FLUX
-use_flux: True
+# use_flux: True
+use_flux: False

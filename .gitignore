@@ -25,3 +25,9 @@ output/
 *.splat
 examples/
 **/.freefine_checkout/
+eval/external/DesignEdit/
+eval/manifests/
+eval/output/
+eval/external/FreeFine/
+img/
+examples/sky_images/

@@ -1,7 +1,7 @@
 device: cuda
 
 negative_inpainting_prompt: "collage, text, writings, signs, text, white border, photograph border, artifacts, blur, blurry, foggy, fog, person, bad quality, distortions, distorted image, watermark, signature, fisheye look"
-num_frames: 1
+num_frames: 16
 frames: 5
 seed: 2
 
@@ -44,8 +44,8 @@ dilate_mask_decoder_ft: 3
 regenerate_times: 3
 debug: False
 
-gen_sky: False
-gen_layer: False
+gen_sky: True
+gen_layer: True
 
 camera_speed_multiplier_rotation: 0.3
 api_key: ""
@@ -57,11 +57,11 @@ num_scenes: 16
 use_free_lunch: False
 
 #test: use flux
-use_flux: True
+use_flux: False
 
-# Device for BCOT-HVE (BCOTHVEPipeline) and SyncDiffusion sky generation.
+# Device for BCDM (BCDMPipeline) and SyncDiffusion sky generation.
 # Set to cuda:0 if only one GPU is available, or to free up cuda:0 for other models.
-bcot_device: cuda:1
+bcdm_device: cuda:1
 
 # Number of interpolated in-between scenes to generate per keyframe segment.
 # 0 = keyframes only (original behaviour). k > 0 inserts k evenly-spaced scenes

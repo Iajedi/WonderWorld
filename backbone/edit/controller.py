@@ -64,6 +64,18 @@ def _compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     return float(a * num_steps + b)
 
 
+# ------------------------------------------------------------------
+# Inversion
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Boundary-constrained distribution matching
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Denoising (UniEdit-Flow)
+# ------------------------------------------------------------------
+
 class BCDMPipeline:
     """End-to-end BCDM inpainting / outpainting controller.
 
@@ -97,13 +109,8 @@ class BCDMPipeline:
         torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
 
-    def to(self, device: str) -> "BCDMPipeline":
-        """Move the underlying model weights to *device*.
-
-        ``self.device`` (the configured home device) is intentionally left
-        unchanged so that callers can restore the model with
-        ``pipeline.to(pipeline.device)`` after a temporary CPU offload.
-        """
+    # Move the underlying model weights to specified device.
+    def to(self, device: str):
         self.wrapper.pipe.to(device)
         self.wrapper.device = str(device)
         return self
@@ -176,6 +183,7 @@ class BCDMPipeline:
                 inv_trajectory.append(z.clone().to(dtype))
             return callback_kwargs
 
+        # Inv
         self.wrapper.invert_scheduler.set_hyperparameters(alpha=1.0)
         pipe.scheduler = self.wrapper.invert_scheduler
         time_start = time.time()
@@ -190,6 +198,7 @@ class BCDMPipeline:
             callback_on_step_end=_inv_callback if observed_reinject else None,
             callback_on_step_end_tensor_inputs=["latents"],
         ).images
+        # Inv
         time_end = time.time()
         print(f"BCDM Inversion time: {time_end - time_start} seconds")
         
@@ -362,6 +371,9 @@ class BCDMPipeline:
     # Phase C helpers
     # ------------------------------------------------------------------
 
+    # Helper function for color correction on decoded image to fix VAE decoding color drift.
+    # Per-channel affine (mean + std) color correction on decoded latent.
+    # Adapted from https://github.com/regiellis/ComfyUI-EasyColorCorrector/blob/main/src/nodes/vae_color_corrector.py
     @staticmethod
     def _vae_affine_color_fix_decoded(
         decoded: torch.Tensor,

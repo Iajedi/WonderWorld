@@ -26,3 +26,5 @@ gen_sky: False
 gen_layer: True
 # load previously generated gaussians
 load_gen: False
+
+use_flux: True
