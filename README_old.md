@@ -1,48 +1,39 @@
-# Training-Free, Editable and Interactive 3D Scene Generation from a Single Image
+<p align="center">
+    <img src="assets/logo.png" height=150>
+</p>
 
-Isaac Lee (iyl22)
+# Interactive 3D Scene Generation from a Single Image
+
+<div align="center">
+
+[![a](https://img.shields.io/badge/Website-WonderWorld-blue)](https://kovenyu.com/wonderworld/)
+[![arXiv](https://img.shields.io/badge/arXiv-2406.09394-red)](https://arxiv.org/abs/2406.09394)
+[![twitter](https://img.shields.io/twitter/url?label=Koven_Yu&url=https%3A%2F%2Ftwitter.com%2FKoven_Yu)](https://x.com/Koven_Yu/status/1835769026934673595)
+</div>
+
+
+
+https://github.com/user-attachments/assets/fdf63ae1-362d-4916-9733-71516d61a437
+
+
+> #### [WonderWorld: *Interactive* 3D Scene Generation from a Single Image](https://arxiv.org/abs/2406.09394)
+> ##### [Hong-Xing "Koven" Yu*](https://kovenyu.com/), [Haoyi Duan*](https://haoyi-duan.github.io/), [Charles Herrmann](https://scholar.google.com/citations?user=LQvi5XAAAAAJ&hl=en), [William T. Freeman](https://billf.mit.edu/), [Jiajun Wu](https://jiajunwu.com/) ("*" denotes equal contribution)
+
 
 ## Getting Started
 
 ### Installation
-
 For the installation to be done correctly, please proceed only with CUDA-compatible GPU available.
 It requires 48GB GPU memory to run.
 
-For our method, we tested it on **RTX Blackwell Pro 6000** and RTX 4090 machines with CUDA 12.8 and 13.0 installed respectively. The original stack of `pytorch==2.4.0` and `cuda==12.4` does not apply to Blackwell architectures (sm_120), hence we document the installation instructions for Blackwell Pro 6000 (since RTX 4090 machines install smoothly with `sm8_9` support). 
-
-Clone the repo and create the environment (with `conda`):
-
+Clone the repo and create the environment:
 ```bash
-conda create --name wonderworld python=3.10.19
-conda activate wonderworld
-python -m pip install --upgrade pip setuptools wheel ninja
+git clone https://github.com/KovenYu/WonderWorld.git && cd WonderWorld
+mamba create --name wonderworld python=3.10
+mamba activate wonderworld
 ```
-
-Install pytorch with CUDA 12.8:
-
-```sh
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-conda install -y -c fvcore -c iopath -c conda-forge fvcore iopath
-```
-
-We set environment variables to enable `sm_120` support.
-
-```
-export TORCH_CUDA_ARCH_LIST="12.0"
-export FORCE_CUDA=1
-```
-
-We are using  [Pytorch3D](https://github.com/facebookresearch/pytorch3d) to perform rendering. To use the library with Blackwell, we need to update CUDA toolkits `nvcc` . If it is missing, we install it via conda and point `CUDA_HOME=$CONDA_PREFIX` .
-
-```
-conda install -y -c nvidia cuda-nvcc cuda-cudart-dev cuda-libraries-dev
-export CUDA_HOME="$CONDA_PREFIX"
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$CUDA_HOME/lib:$LD_LIBRARY_PATH"
-```
-
- Run the following commands to install it or follow their [installation guide](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) (it may take some time). 
+We are using  <a href="https://github.com/facebookresearch/pytorch3d" target="_blank">Pytorch3D</a> to perform rendering.
+Run the following commands to install it or follow their <a href="https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md" target="_blank">installation guide</a> (it may take some time). We tested on `cuda=12.4`, other `cuda` versions should also work.
 
 ```bash
 # switch to cuda 12.4, other versions should also work
@@ -68,27 +59,28 @@ export OPENAI_API_KEY='your_api_key_here'
 ```
 
 Download RepViT model and put it to the root directory.
-
 ```bash
 wget https://github.com/THU-MIG/RepViT/releases/download/v1.0/repvit_sam.pt
 ```
 
-### Run examples
+### Run examples 
 
 - Example config file
-To run an example, first you need to write a config. An example config `./config/example.yaml` is shown below (more examples are located at `config/more_examples`, feel free to try):
+
+  To run an example, first you need to write a config. An example config `./config/example.yaml` is shown below (more examples are located at `config/more_examples`, feel free to try):
+
   ```yaml
   runs_dir: output/real_campus_2
   example_name: real_campus_2
-
+  
   seed: 1
   # enable guided depth diffusion
   depth_conditioning: True
-
+  
   # use gpt to generate scene description
   use_gpt: False
   debug: True
-
+  
   # depth model and camera/depth parameters
   depth_model: marigold
   camera_speed: 0.001
@@ -96,42 +88,53 @@ To run an example, first you need to write a config. An example config `./config
   depth_shift: 0.001
   sky_hard_depth: 0.02
   init_focal_length: 960
-
+  
   # re-generate sky panorama images
   gen_sky_image: False
   # generate sky point cloud
   gen_sky: False
-
+  
   # enable layer-wise generation
   gen_layer: True
   # load previously generated gaussians
   load_gen: False
   ```
+
 - Run
+
   ###### Local Visualization Setup:
+  
   On your local laptop, `git clone https://github.com/haoyi-duan/splat.git` and open `index_stream.html`.
+  
   To enable interactive visualization of your results through this local web browser, follow these steps:
+  
   - Ensure you have `'ssh'` installed on your local machine.
   - The main program will run on server user_id@server_name
+  
   ```shell
   # On your local machine
   ssh -L 7777:localhost:7777 server_name
   ```
+  
   ###### Main Program Running:
+  
   On the server, run the main program:
+  
   ```bash
   # On user_id@server_name
   python run.py --example_config config/example.yaml --port 7777
   ```
   More examples are located at `config/more_examples`, feel free to try!
+  
   ###### Interactive Generation Step:
+  
   Open the `index_stream.html` on your local machine, and you should see the scene in it. You can navigate with `WSAD` and arrow keys.
-  1. If you specify `use_gpt=True` in your example configuration file, the scene description for this new scene will be automatically generated by LLM; if you specify `use_gpu=False`, you can manually input scene description you want in the text box of the local browser. Remember to click 'Next scene is ...' after you are done.
-  2. Next you need to set a proper camera view for the program to generate new scene. You can do this by wondering through the browser to a novel view, then press key `'R'` to let program interactively generate new scene in this view for you.
-  3. You can also enable interactive geometric editing by clicking the "Edit View" button. The edit will run asynchronously as you are still able to navigate the scene.
-  4. If you are not satisfied with the current generation, you can press key `Z` to delete the previous one generation, and follow step 1 and 2 to do a new generation.
-  5. Repeat 1-3, you will interactively generate a large-scale connected scene, and you can wonder through the scene freely during the whole process.
-  6. After some generation, you can press key `X` to save the current scene. Next time, you can load the generated scene by specifying `load_gen=True` in your configuration file.
+  
+  1. If you specify `use_gpt=True` in your example configuration file, the scene description for this new scene will be automatically generated by LLM; if you specify `use_gpu=False`, you can manually input scene description you want in the text box of the local browser. Remember to click 'Next scene is ...' after you are done.  
+  2. Next you need to set a proper camera view for the program to generate new scene. You can do this by wondering through the browser to a novel view, then press key `'R'` to let program interactively generate new scene in this view for you. 
+  3. If you are not satisfied with the current generation, you can press key `Z` to delete the previous one generation, and follow step 1 and 2 to do a new generation.
+  4. Repeat 1-3, you will interactively generate a large-scale connected scene, and you can wonder through the scene freely during the whole process.
+  5. After some generation, you can press key `X` to save the current scene. Next time, you can load the generated scene by specifying `load_gen=True` in your configuration file.
 
 ### How to add more examples?
 
@@ -139,8 +142,11 @@ We highly encourage you to add new images and try new stuff!
 You would need to do the image-caption pairing separately (e.g., using DALL-E to generate image and GPT4V to generate description).
 
 - Add a new image in `./examples/images/`.
+
 - Add content of this new image in `./examples/examples.yaml`.
-Here is an example:
+
+  Here is an example:
+
   ```yaml
   - name: new_example
     image_filepath: examples/images/new_example.png
@@ -149,10 +155,15 @@ Here is an example:
     negative_prompt: ''
     background: ''
   ```
+
   - **content_prompt**: "scene name", "object 1", "object 2", "object 3"
+
   - **negative_prompt** and **background** are optional
+
 - Write a config `config/new_example.yaml` like `./config/example.yaml` for the new example.
+
 - Run the program following the [previous section](#run-examples). (For the first time use, the model will automatically generate the panorama sky images for the example, which takes about 20 minutes on A6000 GPU. After the corresponding sky images for the example are stored, later use of this example will automatically skip this step)
+
 
 ## Citation
 
@@ -167,9 +178,8 @@ Here is an example:
 
 ## Related Project
 
-- [CVPR2025] **[WonderWorld**: Interactive 3D Scene Generation from a Single Image](https://kovenyu.com/WonderWorld/)
-- [CVPR2024] **[WonderJourney**: Going from Anywhere to Everywhere](https://kovenyu.com/wonderjourney/)
+- [CVPR2024] [**WonderJourney**: Going from Anywhere to Everywhere](https://kovenyu.com/wonderjourney/)
 
 ## Acknowledgement
 
-We appreciate the authors of [WonderWorld](https://kovenyu.com/WonderWorld/) for sharing their code.
+We appreciate the authors of [Marigold](https://github.com/prs-eth/Marigold), [SyncDiffusion](https://github.com/KAIST-Visual-AI-Group/SyncDiffusion), [RepViT](https://github.com/THU-MIG/RepViT), [Stable Diffusion](https://huggingface.co/stabilityai/stable-diffusion-2-inpainting), and [OneFormer](https://github.com/SHI-Labs/OneFormer) to share their code.

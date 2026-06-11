@@ -46,6 +46,7 @@ except ImportError:
         dilate_token_mask,
     )
 
+# Optimal transport and Poisson interpolation for BCDM warm-start
 try:
     from edit.optimal_transport import (
         build_transport_cost,
@@ -67,12 +68,13 @@ except ImportError:
         mask_2d_from_token_mask,
     )
 
+# Geometry edit utilities
 try:
     from geometry.spec import EditType, GeometrySpec
     from geometry.utils import (
         build_boundary_blur_mask,
         build_inpainting_mask,
-        geometry_mask_to_controller_np,
+        geom_mask_to_np,
         inverse_affine_coeffs_for_pil,
         mask_tensor_to_pil_l,
     )
@@ -81,7 +83,7 @@ except ImportError:
     from backbone.geometry.utils import (
         build_boundary_blur_mask,
         build_inpainting_mask,
-        geometry_mask_to_controller_np,
+        geom_mask_to_np,
         inverse_affine_coeffs_for_pil,
         mask_tensor_to_pil_l,
     )
@@ -615,7 +617,7 @@ class BackbonePipeline:
             # If others, build inpainting mask and apply inpainting with our method
             inpaint_mask = build_inpainting_mask(spec)
             if bool(torch.any(inpaint_mask.detach().float() > 0.5)):
-                inpaint_mask_np = geometry_mask_to_controller_np(inpaint_mask, image_size)
+                inpaint_mask_np = geom_mask_to_np(inpaint_mask, image_size)
                 # Run existing pipeline for inpainting
                 inpainted_image = self.run(
                     src_image,
@@ -675,12 +677,12 @@ class BackbonePipeline:
         refine_mask_np = build_boundary_blur_mask(
             spec.mask_tgt,
             size_hw=image_size,
-            band_kernel_size=band_k,
+            # band_kernel_size=band_k,
             gaussian_radius=blur_r,
-            sigma_inside=sigma_in,
-            sigma_outside=sigma_out,
+            # sigma_inside=sigma_in,
+            # sigma_outside=sigma_out,
         )
-        target_mask_np = geometry_mask_to_controller_np(spec.mask_tgt, image_size)
+        target_mask_np = geom_mask_to_np(spec.mask_tgt, image_size)
         # Expand to have the union of target mask and seam mask
         late_refine_mask_np = np.maximum(refine_mask_np, target_mask_np).astype(np.float32)
         late_edit_steps = 5

@@ -1,4 +1,4 @@
-"""Extract vitality layers for FLUX.2 klein"""
+"""Extract vitality layers for FLUX.2 klein. Uses the Stable Flow method mentioned in appendix of our report."""
 import torch
 from diffusers import Flux2KleinPipeline
 from transformers import AutoImageProcessor, AutoModel

@@ -1,6 +1,6 @@
-# Text-Guided Inpainting Benchmark Suite
+# Evaluation suite (for chapter 4 of report)
 
-Lightweight, reproducible benchmarking for text-guided image inpainting and geometric editing. The suite builds fixed 1k-sample benchmarks from Flickr30k + NVIDIA masks (inpainting) or GeoBench 2D (geometric editing), runs methods through unified adapter interfaces, and reports PSNR, LPIPS, FID, and CLIP prompt adherence where applicable.
+Lightweight, reproducible benchmarking for inpainting, outpainting (panoramic) and geometric editing. The suite builds fixed 1k-sample benchmarks from Flickr30k + NVIDIA masks (inpainting) or GeoBench 2D (geometric editing), runs methods through unified adapter interfaces, and reports PSNR, LPIPS, FID, and CLIP prompt adherence where applicable.
 
 ## Folder structure
 
@@ -15,6 +15,7 @@ eval/
   runners/
     run_single.py              # Inpainting evaluation CLI
     run_geometric_edit.py      # GeoBench geometric editing CLI
+    run_pano_eval.py           # Panoramic generation evaluation CLI
   output/                      # Generated manifests, images, results
 ```
 
