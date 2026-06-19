@@ -361,6 +361,7 @@ class FrameSyn(torch.nn.Module):
 
         # fill in image
         img = (padded_rendered_image[0].cpu().permute([1, 2, 0]).numpy() * 255).astype(np.uint8)
+        use_explicit_fill_mask = fill_mask is not None
         fill_mask = padded_inpainting_mask if fill_mask is None else fill_mask
         fill_mask_ = (fill_mask[0, 0].cpu().numpy() * 255).astype(np.uint8)
         mask = (padded_inpainting_mask[0, 0].cpu().numpy() * 255).astype(np.uint8)
@@ -405,12 +406,14 @@ class FrameSyn(torch.nn.Module):
             )
             bcdm_mask_np = (np.array(bcdm_mask_pil, dtype=np.float32) / 255.0).reshape(1, 1, 512, 512)
             
-            # Run outpainting/inpainting
-            is_content_inpainting = fill_mask is not None # If fill_mask is not None, then it is content inpainting for foreground layer
+            # Base layer (generate_layer): BCDM warm start on.
+            # Foreground / second-layer path (caller passed fill_mask): BCDM off.
+            is_content_inpainting = use_explicit_fill_mask
             inpainted_image = self.inpainting_pipeline.run(
                 image=bcdm_input_image,
                 prompt_src=prompt_src,
                 prompt_tgt=prompt_tgt,
+                steps=int(diffusion_steps),
                 warm_start_steps=0 if is_content_inpainting else 10,
                 unknown_mask=bcdm_mask_np,
             )

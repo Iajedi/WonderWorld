@@ -335,7 +335,7 @@ class BackbonePipeline:
                     v_src_full=v_src,
                     mask_2d=unknown_token_mask_2d,
                     alpha=alpha_k,
-                    lambda_s=0.5,
+                    lambda_s=0.2,
                     token_hw=token_hw,
                     connectivity=8,
                 )
@@ -387,6 +387,7 @@ class BackbonePipeline:
         omega=7.0, # Guidance scale for Uni-Edit scheduler
         # Warm start steps
         warm_start_steps=10,
+        schedule_k=None,
         known_mask=None, # Known region token mask for reinjection
         # Harmonisation mask and steps for geometric editing (last steps)
         harmonisation_mask=None,
@@ -399,8 +400,10 @@ class BackbonePipeline:
         # Retrieve image sequence length
         N = z_1.shape[1]
 
-        # Set up Uni-Edit scheduler for denoising
-        alpha = (steps - warm_start_steps) / steps if warm_start_steps > 0 else 1.0
+        # Set up Uni-Edit scheduler for denoising (schedule_k matches commit K=max(1,T//5))
+        if schedule_k is None:
+            schedule_k = max(1, steps // 5)
+        alpha = (steps - schedule_k) / steps if schedule_k > 0 else 0.7
         self.edit_scheduler.set_hyperparameters(alpha=alpha, omega=omega)
         self.edit_scheduler.set_mask_token_shape(tok_h, tok_w)
         self.edit_scheduler.set_external_guidance_mask(unknown_mask)
@@ -424,16 +427,20 @@ class BackbonePipeline:
         else:
             self.edit_scheduler.set_late_external_guidance_mask(None, 0)
 
+        # Reinject mask for observed-region restoration: use the expanded/dilated mask when
+        # provided (known_mask), so boundary tokens stay anchored to the inversion trajectory.
+        # The edit scheduler keeps its own guidance mask (unknown_mask) for velocity fusion.
+        reinject_mask = known_mask if known_mask is not None else unknown_mask
+
         # Denoising loop
         z_t = z_1.clone()
         for j, t in tqdm(enumerate(timesteps), total=num_edit_steps, desc="Denoising"):
-            step_mask = unknown_mask
+            step_mask = reinject_mask
             if use_harmonisation_mask and j >= num_edit_steps - late_steps:
                 step_mask = harmonisation_token_mask
 
             # Index into inversion_trajectory: map edit step j -> inversion step
-            # This is to factor in warm start steps from BCDM
-            reinject_idx = steps - warm_start_steps - j
+            reinject_idx = steps - schedule_k - j
             reinject_idx = max(0, min(reinject_idx, len(inversion_trajectory) - 1))
             z_inv = inversion_trajectory[reinject_idx]
             z_inv_batch = z_inv.expand(2, -1, -1)
@@ -457,11 +464,11 @@ class BackbonePipeline:
             # Scheduler step (UniEditEulerScheduler handles velocity fusion)
             z_t = self.edit_scheduler.step(noise_pred, t, z_t, return_dict=False)[0]
 
-        # Final reinjection before VAE decoding
+        # Final reinjection before VAE decoding using the clean inversion latent
         if len(inversion_trajectory) > 0:
             z_inv_batch = inversion_trajectory[0].expand(2, -1, -1)
-            step_mask = known_mask if use_harmonisation_mask else unknown_mask
-            z_t = step_mask * z_t + (1.0 - step_mask) * z_inv_batch
+            final_mask = harmonisation_token_mask if use_harmonisation_mask else reinject_mask
+            z_t = final_mask * z_t + (1.0 - final_mask) * z_inv_batch
 
         # Return denoised latent for decoding
         return z_t
@@ -483,13 +490,27 @@ class BackbonePipeline:
         if unknown_mask is None:
             return image
 
-        # Skip BCDM (for inpainting) if warm start steps is 0
+        # Skip BCDM warm start if warm_start_steps is 0 (content inpainting)
         skip_bcdm = warm_start_steps <= 0
-        
+        schedule_k = max(1, steps // 5)
+
+        # Store original image for VAE color correction before modifying it
+        reference_image = image.convert("RGB") if hasattr(image, "convert") else image
+
+        # Black out unknown region before encode for outpainting only (warm_start_steps > 0)
+        if warm_start_steps > 0:
+            mask_pil_bw = Image.fromarray(
+                (unknown_mask.squeeze() * 255).astype(np.uint8), mode="L"
+            ).resize(reference_image.size if hasattr(reference_image, "size") else (512, 512))
+            bg = Image.new("RGB", reference_image.size, (0, 0, 0))
+            image = Image.composite(bg, reference_image, mask_pil_bw)
+
         # VAE encode
         image_latent, latent_ids = self.image_to_latent(image)
         # Invert image into noisy latent z_1
-        z_1, inversion_trajectory = self.invert_image(image_latent, latent_ids, store_for_reinjection=True)
+        z_1, inversion_trajectory = self.invert_image(
+            image_latent, latent_ids, steps=steps, store_for_reinjection=True
+        )
         # Build packed latent
         z_1_edit = torch.cat([z_1, z_1], dim=0)
         _, c, h, w = z_1_edit.shape
@@ -526,10 +547,16 @@ class BackbonePipeline:
         else:
             harmonisation_token_mask = None
 
-        # Replace unknown region with Gaussian noise (naive initialisation)
-        if not skip_bcdm:
-            eps = torch.randn_like(z_1_packed[:1], generator=torch.Generator(device=z_1_packed.device).manual_seed(self.seed)) # Noise
-            z_1_packed = (1. - token_mask) * z_1_packed + token_mask * torch.cat([eps, eps], dim=0)
+        # Replace unknown tokens with Gaussian noise unconditionally so that the
+        # generative denoising always starts from a proper noise distribution for
+        # the unknown region (matches reference BCDMPipeline.run behaviour)
+        eps = torch.randn(
+            z_1_packed[:1].shape,
+            device=z_1_packed.device,
+            dtype=z_1_packed.dtype,
+            generator=torch.Generator(device=z_1_packed.device).manual_seed(self.seed),
+        )
+        z_1_packed = (1. - token_mask) * z_1_packed + token_mask * torch.cat([eps, eps], dim=0)
 
         # Boundary-constrained distribution matching (BCDM)
         # Prepare prompt embeddings for editing
@@ -573,18 +600,19 @@ class BackbonePipeline:
             steps=steps,
             omega=omega,
             warm_start_steps=warm_start_steps,
+            schedule_k=schedule_k,
             known_mask=reinject_token_mask,
             harmonisation_mask=harmonisation_mask,
             harmonisation_token_mask=harmonisation_token_mask,
             late_steps=late_steps
         )
         
-        # Decode latent to image
+        # Decode latent to image, using the original (pre-blackout) image as colour reference
         decoded_image = self.latent_to_image(
             z_0,
             latent_image_ids, 
             unknown_mask=unknown_mask,
-            reference_image=image,
+            reference_image=reference_image,
             vae_color_fix=vae_color_fix
         )
 
@@ -839,80 +867,80 @@ def vae_affine_color_fix_decoded(
 #     decoded_image.save("outputs/decoded_image_inpainting.png")
 
 
-if __name__ == "__main__":
-    # Geometry edit smoke test (hardcoded from configs/geom_edit_pipeline.yaml / run_geom_edit.py).
-    from typing import Any, Dict, Sequence
+# if __name__ == "__main__":
+#     # Geometry edit smoke test (hardcoded from configs/geom_edit_pipeline.yaml / run_geom_edit.py).
+#     from typing import Any, Dict, Sequence
 
-    _GEOM_CANVAS_HW = (512, 512)
+#     _GEOM_CANVAS_HW = (512, 512)
 
-    def _geom_load_mask_tensor(path: str) -> torch.Tensor:
-        h, w = _GEOM_CANVAS_HW
-        img = Image.open(path).convert("L").resize((w, h))
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        return torch.from_numpy(arr).unsqueeze(0)
+#     def _geom_load_mask_tensor(path: str) -> torch.Tensor:
+#         h, w = _GEOM_CANVAS_HW
+#         img = Image.open(path).convert("L").resize((w, h))
+#         arr = np.asarray(img, dtype=np.float32) / 255.0
+#         return torch.from_numpy(arr).unsqueeze(0)
 
-    def _geom_paste_mask_centroid(paste_m: torch.Tensor) -> tuple[float, float]:
-        m = paste_m.detach()
-        while m.ndim > 3:
-            m = m.squeeze(0)
-        plane = m[0] if m.ndim == 3 else m
-        H, W = plane.shape
-        ys, xs = torch.where(plane > 0.5)
-        if ys.numel() == 0:
-            return (W - 1) * 0.5, (H - 1) * 0.5
-        return float(xs.float().mean()), float(ys.float().mean())
+#     def _geom_paste_mask_centroid(paste_m: torch.Tensor) -> tuple[float, float]:
+#         m = paste_m.detach()
+#         while m.ndim > 3:
+#             m = m.squeeze(0)
+#         plane = m[0] if m.ndim == 3 else m
+#         H, W = plane.shape
+#         ys, xs = torch.where(plane > 0.5)
+#         if ys.numel() == 0:
+#             return (W - 1) * 0.5, (H - 1) * 0.5
+#         return float(xs.float().mean()), float(ys.float().mean())
 
-    def _geom_affine_from_compose_entry(entry: Dict[str, Any], paste_m: torch.Tensor) -> torch.Tensor:
-        if "matrix" in entry and entry["matrix"] is not None:
-            t = torch.tensor(entry["matrix"], dtype=torch.float32)
-            if t.shape != (3, 3):
-                raise ValueError("'matrix' must be 3x3")
-            return t
-        s = float(entry.get("scale", 1.0))
-        dx = float(entry.get("dx", 0.0))
-        dy = float(entry.get("dy", 0.0))
-        cx, cy = _geom_paste_mask_centroid(paste_m)
-        tx = cx * (1.0 - s) + dx
-        ty = cy * (1.0 - s) + dy
-        return torch.tensor([[s, 0.0, tx], [0.0, s, ty], [0.0, 0.0, 1.0]], dtype=torch.float32)
+#     def _geom_affine_from_compose_entry(entry: Dict[str, Any], paste_m: torch.Tensor) -> torch.Tensor:
+#         if "matrix" in entry and entry["matrix"] is not None:
+#             t = torch.tensor(entry["matrix"], dtype=torch.float32)
+#             if t.shape != (3, 3):
+#                 raise ValueError("'matrix' must be 3x3")
+#             return t
+#         s = float(entry.get("scale", 1.0))
+#         dx = float(entry.get("dx", 0.0))
+#         dy = float(entry.get("dy", 0.0))
+#         cx, cy = _geom_paste_mask_centroid(paste_m)
+#         tx = cx * (1.0 - s) + dx
+#         ty = cy * (1.0 - s) + dy
+#         return torch.tensor([[s, 0.0, tx], [0.0, s, ty], [0.0, 0.0, 1.0]], dtype=torch.float32)
 
-    def _geom_spec_compose_multi() -> GeometrySpec:
-        prompt_inpaint = (
-            "Indoor table scene with soft, blurred background, with a log platter, plant vase and cup."
-        )
-        prompt_refine = (
-            "A snowman with a yellow hat and scarf sitting on a log platter, against a soft, "
-            "blurred table background. The scarf has white ends"
-        )
-        removal_mask = _geom_load_mask_tensor(
-            "inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png"
-        )
-        compose_entry: Dict[str, Any] = {
-            "paste_mask": "inputs/snowman_mask.png",
-            "dy": -40,
-            "scale": 0.75,
-        }
-        paste_m = _geom_load_mask_tensor(str(compose_entry["paste_mask"]))
-        T = _geom_affine_from_compose_entry(compose_entry, paste_m)
-        return GeometrySpec.for_compose_multi(
-            [removal_mask],
-            [(T, paste_m)],
-            prompt_inpaint,
-            prompt_refine,
-            mask_user=None,
-        )
+#     def _geom_spec_compose_multi() -> GeometrySpec:
+#         prompt_inpaint = (
+#             "Indoor table scene with soft, blurred background, with a log platter, plant vase and cup."
+#         )
+#         prompt_refine = (
+#             "A snowman with a yellow hat and scarf sitting on a log platter, against a soft, "
+#             "blurred table background. The scarf has white ends"
+#         )
+#         removal_mask = _geom_load_mask_tensor(
+#             "inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source_mask.png"
+#         )
+#         compose_entry: Dict[str, Any] = {
+#             "paste_mask": "inputs/snowman_mask.png",
+#             "dy": -40,
+#             "scale": 0.75,
+#         }
+#         paste_m = _geom_load_mask_tensor(str(compose_entry["paste_mask"]))
+#         T = _geom_affine_from_compose_entry(compose_entry, paste_m)
+#         return GeometrySpec.for_compose_multi(
+#             [removal_mask],
+#             [(T, paste_m)],
+#             prompt_inpaint,
+#             prompt_refine,
+#             mask_user=None,
+#         )
 
-    src_path = "inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source.png"
-    tgt_path = "inputs/snowman.jpg"
-    outdir = "outputs/geom_edit_pipeline"
-    os.makedirs(outdir, exist_ok=True)
+#     src_path = "inputs/freefine/.freefine_checkout/Examples/Editing/2D/cake/source.png"
+#     tgt_path = "inputs/snowman.jpg"
+#     outdir = "outputs/geom_edit_pipeline"
+#     os.makedirs(outdir, exist_ok=True)
 
-    spec = _geom_spec_compose_multi()
-    src_image = Image.open(src_path).convert("RGB").resize((512, 512))
-    tgt_image = Image.open(tgt_path).convert("RGB").resize((512, 512))
+#     spec = _geom_spec_compose_multi()
+#     src_image = Image.open(src_path).convert("RGB").resize((512, 512))
+#     tgt_image = Image.open(tgt_path).convert("RGB").resize((512, 512))
 
-    pipe = BackbonePipeline()
-    result = pipe.run_geom_edit(src_image, tgt_image, spec)
-    result.save(os.path.join(outdir, "refined.png"))
-    print(f"[pipeline] Geometry edit done. Saved to {outdir}/refined.png")
+#     pipe = BackbonePipeline()
+#     result = pipe.run_geom_edit(src_image, tgt_image, spec)
+#     result.save(os.path.join(outdir, "refined.png"))
+#     print(f"[pipeline] Geometry edit done. Saved to {outdir}/refined.png")
 

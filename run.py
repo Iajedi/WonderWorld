@@ -435,7 +435,7 @@ def run(config):
             outpaint_mask_for_new_points = outpaint_mask
         
         bcdm_src, bcdm_tgt = "", ""
-        if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"] and config["use_gpt"]:
+        if isinstance(pt_gen, GeminiTextpromptGen) and config["use_flux"]:
             bcdm_src, bcdm_tgt = pt_gen.build_bcdm_inpaint_pair_from_conditioning_image(
                 outpaint_condition_image, style_prompt, scene_dict
             )
